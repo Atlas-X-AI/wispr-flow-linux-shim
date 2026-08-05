@@ -27,7 +27,10 @@ if [ "$(uname -m)" != x86_64 ]; then
     exit 1
 fi
 
-sudo pacman -S --needed --noconfirm \
+# Arch does not support partial upgrades. -Syu refreshes stale package metadata
+# and upgrades the base before adding dependencies, so old mirror filenames can
+# never turn a clean bootstrap into a misleading application failure.
+sudo pacman -Syu --needed --noconfirm \
     wine ydotool wl-clipboard xclip xdotool libnotify python-evdev \
     libayatana-appindicator python-gobject curl
 

@@ -120,7 +120,7 @@ class ProvisioningTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             calls = log.read_text()
-            self.assertIn("sudo:pacman -S --needed --noconfirm", calls)
+            self.assertIn("sudo:pacman -Syu --needed --noconfirm", calls)
             self.assertIn("xclip", calls)
             self.assertIn("systemctl:--user enable --now ydotool.service", calls)
             self.assertTrue((home / ".local/bin/kdotool").is_file())

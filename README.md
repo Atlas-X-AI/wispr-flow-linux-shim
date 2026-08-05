@@ -50,7 +50,7 @@ supported.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Atlas-X-AI/wispr-flow-linux-shim/v1.1.1/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Atlas-X-AI/wispr-flow-linux-shim/v1.1.2/bootstrap.sh | bash
 ```
 
 The release is pinned, its archive checksum is verified before anything runs,
@@ -58,6 +58,8 @@ and the installer provisions the complete supported stack: Arch packages,
 Wine, `ydotool`, Wayland and X11 clipboard/window tools, a checksum-pinned `kdotool`, the official Wispr Flow Windows
 installer, Atlas Wispr, its tray, and its enabled user services. `sudo` may ask
 for your Linux password while installing packages.
+On Arch, this includes a normal full system sync (`pacman -Syu`) so stale
+mirror metadata cannot leave the machine in a partial-upgrade state.
 
 The proprietary Wispr Flow installer comes directly from Wispr's official
 download host; it is not redistributed by Atlas AI. Its version and SHA-256 are
