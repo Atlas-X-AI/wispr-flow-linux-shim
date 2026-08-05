@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import fcntl
 import json
 import sqlite3
 from pathlib import Path
@@ -415,7 +416,28 @@ def chord_loop(dev: evdev.InputDevice) -> None:
                 dirty = False
 
 
+def acquire_single_instance_lock():
+    """Refuse to run twice.
+
+    Two shims race for every transcript: one arms the auto-paste, the other
+    consumes the row first, and the paste never happens. Found in production
+    when a settings save started a second copy alongside the first.
+    """
+    lock_path = Path(LOG).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another instance is already running - exiting")
+        raise SystemExit(0)
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle  # keep referenced for the process lifetime
+
+
 def main() -> None:
+    _lock = acquire_single_instance_lock()  # noqa: F841 - held until exit
     devs = find_watch_devices()
     threading.Thread(target=transcript_poller, daemon=True).start()
     threads = [threading.Thread(target=chord_loop, args=(d,), daemon=True) for d in devs]

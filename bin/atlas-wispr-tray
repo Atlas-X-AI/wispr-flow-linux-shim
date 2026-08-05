@@ -129,23 +129,35 @@ def start_shim() -> tuple[bool, str]:
 
 
 def stop_shim() -> tuple[bool, str]:
+    """Stop every shim, whichever way it was started.
+
+    Both paths always run: a box can carry a service instance AND a
+    hand-started one, and stopping only the one you know about is what
+    produced two racing shims in production.
+    """
     if service_active():
-        r = sh("systemctl", "--user", "stop", SERVICE, timeout=25)
-        return r.returncode == 0, (r.stderr or "stopped").strip()[:200]
-    sh("pkill", "-f", "wispr-focus-shim")
-    return True, "stopped"
+        sh("systemctl", "--user", "stop", SERVICE, timeout=25)
+    listed = sh("pgrep", "-f", "wispr-focus-shim").stdout.split()
+    own = str(os.getpid())
+    for pid in listed:
+        if pid != own:
+            sh("kill", pid)
+    for _ in range(20):
+        if not process_running():
+            return True, "stopped"
+        __import__("time").sleep(0.2)
+    return False, "a shim is still running"
 
 
 def restart_service() -> tuple[bool, str]:
-    """Apply new settings: the shim reads its config at startup."""
-    if service_installed() and service_active():
-        r = sh("systemctl", "--user", "restart", SERVICE, timeout=25)
-        return r.returncode == 0, (r.stderr or "restarted").strip()[:200]
-    if process_running():
-        stop_shim()
-        import time as _t
+    """Apply new settings by stopping EVERYTHING, then starting exactly one.
 
-        _t.sleep(0.8)
+    The shim reads its config at startup, so settings need a restart - but a
+    restart that stops one instance and starts another kind leaves two.
+    """
+    ok, detail = stop_shim()
+    if not ok:
+        return False, detail
     return start_shim()
 
 
