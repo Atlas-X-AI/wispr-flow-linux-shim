@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Install every Linux-side dependency on the supported Arch/KDE target.
+set -euo pipefail
+export PATH="${HOME}/.local/bin:${PATH}"
+
+os_release="${ATLAS_WISPR_OS_RELEASE:-/etc/os-release}"
+[ -r "$os_release" ] || {
+    printf 'FAIL: cannot read %s to identify this Linux distribution.\n' "$os_release" >&2
+    exit 1
+}
+# shellcheck disable=SC1090
+. "$os_release"
+
+if ! command -v pacman >/dev/null 2>&1 || [ "${ID:-}" != arch ]; then
+    printf 'FAIL: the one-command installer currently supports Arch Linux only.\n' >&2
+    printf 'UNKNOWN: this distribution has not completed the fresh-machine proof.\n' >&2
+    exit 1
+fi
+
+command -v sudo >/dev/null 2>&1 || {
+    printf 'FAIL: sudo is required to install the Arch Linux packages.\n' >&2
+    exit 1
+}
+
+if [ "$(uname -m)" != x86_64 ]; then
+    printf 'FAIL: Atlas Wispr currently supports x86-64 computers only.\n' >&2
+    exit 1
+fi
+
+sudo pacman -S --needed --noconfirm \
+    wine ydotool wl-clipboard libnotify python-evdev \
+    libayatana-appindicator python-gobject curl
+
+kdotool_version="0.2.3"
+kdotool_url="${ATLAS_WISPR_KDOTOOL_URL:-https://github.com/jinliu/kdotool/releases/download/v${kdotool_version}/kdotool-${kdotool_version}-x86_64-unknown-linux-gnu.tar.gz}"
+kdotool_sha="${ATLAS_WISPR_KDOTOOL_SHA256:-a30c09175d1c4180afa394e8ccbf61c8780d79845a2ed89c9f39f7804a5b1433}"
+
+if ! command -v kdotool >/dev/null 2>&1 || [ "${ATLAS_WISPR_FORCE_KDOTOOL_INSTALL:-0}" = 1 ]; then
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/atlas-wispr-kdotool.XXXXXX")"
+    trap 'rm -rf -- "$tmpdir"' EXIT
+    curl -fsSL --retry 3 "$kdotool_url" -o "${tmpdir}/kdotool.tar.gz"
+    printf '%s  %s\n' "$kdotool_sha" "${tmpdir}/kdotool.tar.gz" | sha256sum --check --strict
+    tar -xzf "${tmpdir}/kdotool.tar.gz" -C "$tmpdir" kdotool
+    mkdir -p "${HOME}/.local/bin"
+    install -m 755 "${tmpdir}/kdotool" "${HOME}/.local/bin/kdotool"
+fi
+
+systemctl --user daemon-reload
+systemctl --user enable --now ydotool.service
+printf 'PASS: Arch Linux dependencies provisioned\n'

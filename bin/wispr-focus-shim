@@ -24,10 +24,12 @@ This shim fixes all three from the Linux side:
   stops and auto-pastes the transcript plus Enter.
 
 Requires: python-evdev, ydotool + ydotoold, wl-clipboard, kdotool (KDE/KWin),
-libnotify. Read access to /dev/input (the "input" group).
+libnotify. Direct evdev watching additionally needs read access to /dev/input;
+the default KDE command-shortcut path does not.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -45,7 +47,7 @@ def _ydotool_socket() -> str:
     )
 
 
-def _find_flow_db() -> str:
+def _find_flow_db() -> str | None:
     """Locate Wispr Flow's history db inside any Wine prefix."""
     override = os.environ.get("WISPR_FLOW_DB")
     if override:
@@ -58,9 +60,7 @@ def _find_flow_db() -> str:
         hits = sorted(root.glob(pattern)) + sorted(root.glob("*/" + pattern))
         if hits:
             return str(hits[0])
-    raise SystemExit(
-        "cannot find flow.sqlite - set WISPR_FLOW_DB or WINEPREFIX"
-    )
+    return None
 
 
 CONFIG_PATH = Path(
@@ -127,6 +127,7 @@ LOG = os.environ.get(
 )
 
 IGNORE_UNTIL = 0.0  # deaf window around our own injections (keyd echo)
+TOGGLE_REQUEST = threading.Event()
 
 
 def log(msg: str) -> None:
@@ -150,6 +151,8 @@ def ydo_key(*keyspecs: str) -> None:
 
 
 def find_watch_devices() -> list[evdev.InputDevice]:
+    if not WATCH_NAMES:
+        return []
     found = []
     for path in evdev.list_devices():
         dev = evdev.InputDevice(path)
@@ -157,9 +160,20 @@ def find_watch_devices() -> list[evdev.InputDevice]:
             found.append(dev)
         else:
             dev.close()
-    if not found:
-        raise SystemExit(f"no watch devices found: {WATCH_NAMES}")
     return found
+
+
+def flow_db_path() -> str:
+    """Resolve the database lazily so first login can create it after boot."""
+    global FLOW_DB
+    if FLOW_DB and Path(FLOW_DB).is_file():
+        return FLOW_DB
+    FLOW_DB = _find_flow_db()
+    if not FLOW_DB:
+        raise FileNotFoundError(
+            "flow.sqlite does not exist yet; finish signing into Wispr Flow"
+        )
+    return FLOW_DB
 
 
 def find_wispr_window() -> str | None:
@@ -246,7 +260,7 @@ AWAIT_WINDOW_S = 90.0  # a stop older than this never pastes
 
 
 def recording_in_flight() -> bool:
-    con = sqlite3.connect(f"file:{FLOW_DB}?mode=ro", uri=True, timeout=2)
+    con = sqlite3.connect(f"file:{flow_db_path()}?mode=ro", uri=True, timeout=2)
     try:
         row = con.execute(
             "SELECT status FROM History ORDER BY rowid DESC LIMIT 1"
@@ -286,7 +300,7 @@ def clipboard_text() -> str:
 
 
 def latest_formatted() -> tuple[int, str]:
-    con = sqlite3.connect(f"file:{FLOW_DB}?mode=ro", uri=True, timeout=2)
+    con = sqlite3.connect(f"file:{flow_db_path()}?mode=ro", uri=True, timeout=2)
     try:
         row = con.execute(
             "SELECT rowid, formattedText FROM History "
@@ -312,13 +326,20 @@ def notify(text: str) -> None:
 
 
 def transcript_poller() -> None:
-    try:
-        baseline, _ = latest_formatted()
-    except Exception as e:
-        log(f"poller: cannot read flow db at start ({e}); auto-paste disabled")
-        return
-    log(f"auto-paste poller up, baseline transcript row {baseline}")
+    baseline = None
+    waiting_logged = False
     while True:
+        if baseline is None:
+            try:
+                baseline, _ = latest_formatted()
+                log(f"auto-paste poller up, baseline transcript row {baseline}")
+                waiting_logged = False
+            except Exception as e:
+                if not waiting_logged:
+                    log(f"waiting for Wispr Flow first login ({e})")
+                    waiting_logged = True
+                time.sleep(2)
+                continue
         time.sleep(0.15)
         try:
             rowid, text = latest_formatted()
@@ -451,15 +472,27 @@ def acquire_single_instance_lock():
     return handle  # keep referenced for the process lifetime
 
 
+def toggle_loop() -> None:
+    """Turn SIGUSR1 into the exact same one-button path used by evdev."""
+    while True:
+        TOGGLE_REQUEST.wait()
+        TOGGLE_REQUEST.clear()
+        btn12_toggle()
+
+
 def main() -> None:
     _lock = acquire_single_instance_lock()  # noqa: F841 - held until exit
+    signal.signal(signal.SIGUSR1, lambda *_: TOGGLE_REQUEST.set())
     devs = find_watch_devices()
+    if not devs:
+        log("no evdev keyboard configured; ready for the atlas-wispr-toggle command")
     threading.Thread(target=transcript_poller, daemon=True).start()
+    threading.Thread(target=toggle_loop, daemon=True).start()
     threads = [threading.Thread(target=chord_loop, args=(d,), daemon=True) for d in devs]
     for t in threads:
         t.start()
-    for t in threads:
-        t.join()
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":

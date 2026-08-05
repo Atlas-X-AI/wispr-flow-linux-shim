@@ -98,15 +98,6 @@ def check_dependencies() -> None:
     else:
         report("PASS", "Key injection daemon", "ydotoold running")
 
-    groups = sh("id", "-nG")
-    if groups is None:
-        report("UNKNOWN", "Input access", "could not read your groups")
-    elif "input" in groups.stdout.split():
-        report("PASS", "Input access", "you are in the 'input' group")
-    else:
-        report("FAIL", "Input access", "not in the 'input' group - keys cannot be read")
-
-
 def check_config_and_devices() -> None:
     cfg = {}
     if CONFIG_PATH.exists():
@@ -119,6 +110,9 @@ def check_config_and_devices() -> None:
         report("UNKNOWN", "Settings file", "none yet - defaults apply")
 
     wanted = cfg.get("devices", ["keyd virtual keyboard", "input-remapper keyboard"])
+    if not wanted:
+        report("PASS", "Key trigger", "KDE command-shortcut mode; evdev access not needed")
+        return
     try:
         import evdev
 

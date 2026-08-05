@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Atlas Wispr Toggle
+Comment=Start or stop dictation, then paste and press Enter
+Exec=/usr/bin/bash -lc $HOME/.local/bin/atlas-wispr-toggle
+Icon=atlas-wispr-idle
+NoDisplay=true
+StartupNotify=false
+X-KDE-GlobalAccel-CommandShortcut=true

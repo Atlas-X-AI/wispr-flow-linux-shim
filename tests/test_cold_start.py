@@ -84,8 +84,9 @@ class ColdStartTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertTrue((tmp / ".local/bin/atlas-wispr-launch-flow").is_file())
             self.assertTrue((tmp / ".local/bin/wispr-focus-shim").is_file())
+            self.assertTrue((tmp / ".local/bin/atlas-wispr-toggle").is_file())
             release = (tmp / ".local/share/atlas-wispr/release").read_text()
-            self.assertIn("version=1.0.3", release)
+            self.assertIn("version=1.1.0", release)
             self.assertIn("revision=", release)
             self.assertIn("source_dirty=", release)
             unit = (tmp / ".config/systemd/user/wispr-focus-shim.service").read_text()
@@ -95,6 +96,8 @@ class ColdStartTests(unittest.TestCase):
             self.assertIn("--user enable wispr-focus-shim.service", calls)
             self.assertIn("--user restart wispr-focus-shim.service", calls)
             self.assertTrue((tmp / ".config/autostart/atlas-wispr-tray.desktop").is_file())
+            toggle = (tmp / ".local/share/applications/atlas-wispr-toggle.desktop").read_text()
+            self.assertIn("X-KDE-Shortcuts=F16", toggle)
 
 
 if __name__ == "__main__":

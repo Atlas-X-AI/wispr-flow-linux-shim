@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Stable command target for one KDE key binding.
+set -euo pipefail
+
+service="wispr-focus-shim.service"
+if ! systemctl --user is-active --quiet "$service"; then
+    systemctl --user start "$service"
+    sleep 0.5
+fi
+systemctl --user kill --signal=USR1 --kill-whom=main "$service"

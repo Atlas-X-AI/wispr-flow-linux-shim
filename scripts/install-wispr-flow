@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Install the pinned official Windows build of Wispr Flow into its own prefix.
+set -euo pipefail
+
+prefix="${WINEPREFIX:-${HOME}/.wine-whisperflow}"
+existing="$(find "$prefix/drive_c/users" -maxdepth 7 -type f -path '*/AppData/Local/WisprFlow/Wispr Flow.exe' -print -quit 2>/dev/null || true)"
+if [ -n "$existing" ]; then
+    printf 'PASS: Wispr Flow is already installed at %s\n' "$existing"
+    exit 0
+fi
+
+command -v wine >/dev/null 2>&1 || {
+    printf 'FAIL: wine is missing; run the provisioning installer first.\n' >&2
+    exit 1
+}
+
+installer_url="${ATLAS_WISPR_INSTALLER_URL:-https://dl.wisprflow.com/wispr-flow/win32/x64/Wispr%20Flow%20Setup-v1.6.7.exe}"
+installer_sha="${ATLAS_WISPR_INSTALLER_SHA256:-7659625e90d65524a9fcb388e39f8343468e1a61fdd50afd4ca35818dca07b8f}"
+cache="${HOME}/.cache/atlas-wispr"
+installer="${cache}/Wispr Flow Setup-v1.6.7.exe"
+mkdir -p "$cache"
+
+if ! printf '%s  %s\n' "$installer_sha" "$installer" | sha256sum --check --strict >/dev/null 2>&1; then
+    download="${installer}.download"
+    curl -fL --retry 3 "$installer_url" -o "$download"
+    printf '%s  %s\n' "$installer_sha" "$download" | sha256sum --check --strict
+    mv -f "$download" "$installer"
+fi
+printf 'PASS: official Wispr Flow installer checksum verified\n'
+
+mkdir -p "$prefix"
+installer_rc=0
+WINEPREFIX="$prefix" WINEDEBUG="${WINEDEBUG:--all}" wine "$installer" --silent || installer_rc=$?
+
+deadline=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$deadline" ]; do
+    existing="$(find "$prefix/drive_c/users" -maxdepth 7 -type f -path '*/AppData/Local/WisprFlow/Wispr Flow.exe' -print -quit 2>/dev/null || true)"
+    if [ -n "$existing" ]; then
+        printf 'PASS: Wispr Flow installed at %s\n' "$existing"
+        exit 0
+    fi
+    sleep 1
+done
+
+printf 'FAIL: the verified Wispr Flow installer exited %s and the app did not appear in %s.\n' "$installer_rc" "$prefix" >&2
+exit 1

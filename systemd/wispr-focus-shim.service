@@ -1,8 +1,10 @@
 [Unit]
 Description=Wispr Flow focus shim - hotkey relay, clipboard copy, notifications
-After=graphical-session.target
+Wants=ydotool.service
+After=graphical-session.target ydotool.service
 
 [Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 ExecStartPre=%h/.local/bin/atlas-wispr-launch-flow --wait-seconds 30
 ExecStart=%h/.local/bin/wispr-focus-shim
 Restart=on-failure

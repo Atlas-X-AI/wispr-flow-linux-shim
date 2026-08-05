@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Build the checksum-verified GitHub release assets from the exact committed tree.
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+version="$(tr -d '[:space:]' < "$repo/VERSION")"
+revision="$(git -C "$repo" rev-parse HEAD)"
+out="${1:-$repo/dist}"
+name="atlas-wispr-${version}"
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/atlas-wispr-release.XXXXXX")"
+trap 'rm -rf -- "$tmpdir"' EXIT
+
+mkdir -p "$out" "$tmpdir/$name"
+git -C "$repo" archive HEAD | tar -x -C "$tmpdir/$name"
+printf '%s\n' "$revision" > "$tmpdir/$name/REVISION"
+tar -czf "$out/${name}.tar.gz" -C "$tmpdir" "$name"
+(
+    cd "$out"
+    sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+)
+printf 'PASS: built %s from %s\n' "$out/${name}.tar.gz" "$revision"

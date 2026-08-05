@@ -38,35 +38,44 @@ Wine prefix and does not patch the application.
 - **Paste deny-list.** Windows where a stray Enter would be destructive (system
   settings pages, Wispr itself) are never auto-pasted into.
 
-## Requirements
+## Supported target
 
-- Wayland compositor. Window control uses `kdotool`, so KDE Plasma / KWin is
-  the tested target.
-- Wine, `python-evdev`, `ydotool` + a running `ydotoold`, `wl-clipboard`, `kdotool`,
-  `libnotify`.
-- Your user in the `input` group (read access to `/dev/input`).
+- Arch Linux, x86-64, KDE Plasma 6, Wayland.
+- A working microphone and an internet connection.
+
+That is the target covered by the automated installer and fresh-prefix proof.
+Other distributions and compositors are **UNKNOWN**, not silently treated as
+supported.
 
 ## Install
 
 ```sh
-git clone https://github.com/Atlas-X-AI/wispr-flow-linux-shim
-cd wispr-flow-linux-shim
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/Atlas-X-AI/wispr-flow-linux-shim/v1.1.0/bootstrap.sh | bash
 ```
 
-The installer checks every dependency and tells you exactly what to install if
-something is missing. That one command installs and starts the complete stack.
-The tray opens a setup wizard on first run: pick your keyboard, press the key
-you want for dictation, done. Atlas Wispr and Wispr Flow start together at login
-from then on.
+The release is pinned, its archive checksum is verified before anything runs,
+and the installer provisions the complete supported stack: Arch packages,
+Wine, `ydotool`, a checksum-pinned `kdotool`, the official Wispr Flow Windows
+installer, Atlas Wispr, its tray, and its enabled user services. `sudo` may ask
+for your Linux password while installing packages.
 
-Then, once, allow XWayland to receive global chords so the Wine app can hear
-its own hotkey (KDE Plasma):
+The proprietary Wispr Flow installer comes directly from Wispr's official
+download host; it is not redistributed by Atlas AI. Its version and SHA-256 are
+pinned in the release.
 
-```sh
-kwriteconfig6 --file kwinrc --group Wayland --key XwaylandEavesdrops Combinations
-qdbus6 org.kde.KWin /KWin reconfigure
-```
+After the command finishes:
+
+1. Sign into Wispr Flow in the window it opens.
+2. Bind your desired hardware button to **F16**. Atlas Wispr registers F16 as
+   the KDE shortcut for **Atlas Wispr Toggle**.
+
+That is the whole user setup. One press records. The next press stops,
+auto-pastes the transcript, and presses Enter. Both Wispr Flow and Atlas Wispr
+return automatically at login.
+
+The F16 command path does not require input-group membership or XWayland global
+key eavesdropping. Those are retained only for existing advanced configurations
+that choose to let the shim watch raw evdev devices directly.
 
 ## Configuration
 

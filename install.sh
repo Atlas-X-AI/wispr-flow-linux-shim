@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install Atlas Wispr (tray + shim) into the current user's home.
 set -euo pipefail
+export PATH="${HOME}/.local/bin:${PATH}"
 
 BIN="${HOME}/.local/bin"
 UNITS="${HOME}/.config/systemd/user"
@@ -8,18 +9,40 @@ APPS="${HOME}/.local/share/applications"
 AUTOSTART="${HOME}/.config/autostart"
 ICONS="${HOME}/.local/share/icons/hicolor"
 RELEASE_DIR="${HOME}/.local/share/atlas-wispr"
+CONFIG_DIR="${HOME}/.config/wispr-shim"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-mkdir -p "$BIN" "$UNITS" "$APPS" "$AUTOSTART" "$RELEASE_DIR" "${HOME}/.local/state"
+if [ "${1:-}" = "--provision" ]; then
+  "$here/scripts/provision-system"
+  "$here/scripts/install-wispr-flow"
+elif [ "$#" -gt 0 ]; then
+  printf 'Usage: %s [--provision]\n' "$0" >&2
+  exit 2
+fi
+
+mkdir -p "$BIN" "$UNITS" "$APPS" "$AUTOSTART" "$RELEASE_DIR" "$CONFIG_DIR" "${HOME}/.local/state"
 
 install -m 755 "$here/bin/wispr-focus-shim"     "$BIN/wispr-focus-shim"
 install -m 755 "$here/bin/atlas-wispr-launch-flow" "$BIN/atlas-wispr-launch-flow"
+install -m 755 "$here/bin/atlas-wispr-toggle"   "$BIN/atlas-wispr-toggle"
 install -m 755 "$here/bin/wispr-hub-visibility" "$BIN/wispr-hub-visibility"
 install -m 755 "$here/bin/atlas-wispr-tray"     "$BIN/atlas-wispr-tray"
 install -m 755 "$here/bin/atlas-wispr-doctor"   "$BIN/atlas-wispr-doctor"
 install -m 644 "$here/systemd/wispr-focus-shim.service" "$UNITS/wispr-focus-shim.service"
 install -m 644 "$here/desktop/atlas-wispr-tray.desktop" "$APPS/atlas-wispr-tray.desktop"
 install -m 644 "$here/desktop/atlas-wispr-tray.desktop" "$AUTOSTART/atlas-wispr-tray.desktop"
+install -m 644 "$here/desktop/atlas-wispr-toggle.desktop" "$APPS/atlas-wispr-toggle.desktop"
+fresh_config=false
+if [ ! -e "$CONFIG_DIR/config.json" ]; then
+  install -m 600 "$here/config/default.json" "$CONFIG_DIR/config.json"
+  fresh_config=true
+fi
+if $fresh_config; then
+  # Fresh installs use the command path and need no /dev/input permission.
+  # Existing evdev installs deliberately do not receive this default because
+  # both paths reacting to F16 would toggle twice.
+  printf '%s\n' 'X-KDE-Shortcuts=F16' >> "$APPS/atlas-wispr-toggle.desktop"
+fi
 
 for size in 16 22 24 32 48 64 128 256; do
   mkdir -p "$ICONS/${size}x${size}/apps"
@@ -34,6 +57,7 @@ for size in 16 22 24 32 48 64 128 256; do
   done
 done
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t "$ICONS" 2>/dev/null || true
+command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || true
 systemctl --user daemon-reload
 
 missing=()
@@ -44,7 +68,6 @@ python3 -c "import evdev" 2>/dev/null || missing+=("python-evdev")
 python3 -c "import gi; gi.require_version('AyatanaAppIndicator3','0.1')" 2>/dev/null \
   || missing+=("libayatana-appindicator (python bindings)")
 pgrep -x ydotoold >/dev/null 2>&1 || echo "NOTE: ydotoold is not running - key injection will fail until it is."
-id -nG | tr ' ' '\n' | grep -qx input || echo "NOTE: you are not in the 'input' group - run: sudo usermod -aG input \$USER, then log out and back in."
 
 if [ ${#missing[@]} -gt 0 ]; then
   echo
@@ -55,7 +78,13 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 version="$(tr -d '[:space:]' < "$here/VERSION")"
-revision="$(git -C "$here" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+revision="${ATLAS_WISPR_RELEASE_REVISION:-}"
+if [ -z "$revision" ] && [ -f "$here/REVISION" ]; then
+  revision="$(tr -d '[:space:]' < "$here/REVISION")"
+fi
+if [ -z "$revision" ]; then
+  revision="$(git -C "$here" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+fi
 source_dirty=false
 if git -C "$here" status --porcelain --untracked-files=normal 2>/dev/null | grep -q .; then
   source_dirty=true
@@ -80,4 +109,5 @@ fi
 echo
 echo "Installed and started. Atlas Wispr and Wispr Flow now start together."
 echo "The tray and dictation service will both return automatically at login."
+echo "Bind one KDE shortcut to 'Atlas Wispr Toggle' (or: $BIN/atlas-wispr-toggle)."
 echo "If anything ever misbehaves, run:   atlas-wispr-doctor"

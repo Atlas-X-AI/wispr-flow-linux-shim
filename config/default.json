@@ -1,0 +1,10 @@
+{
+  "devices": [],
+  "one_button_codes": [186],
+  "paste_deny_classes": ["systemsettings"],
+  "window_class": "wispr flow.exe",
+  "auto_paste": true,
+  "press_enter_after_paste": true,
+  "notifications": true,
+  "enabled": true
+}
