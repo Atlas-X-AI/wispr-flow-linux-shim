@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import runpy
 import shutil
 import signal
 import sqlite3
@@ -16,6 +17,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +31,7 @@ def executable(path: Path, body: str) -> None:
 
 class BootstrapTests(unittest.TestCase):
     def make_release(self, root: Path, install_body: str) -> Path:
-        version = "1.1.0"
+        version = (ROOT / "VERSION").read_text().strip()
         release = root / f"atlas-wispr-{version}"
         release.mkdir()
         executable(release / "install.sh", install_body)
@@ -119,6 +121,7 @@ class ProvisioningTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             calls = log.read_text()
             self.assertIn("sudo:pacman -S --needed --noconfirm", calls)
+            self.assertIn("xclip", calls)
             self.assertIn("systemctl:--user enable --now ydotool.service", calls)
             self.assertTrue((home / ".local/bin/kdotool").is_file())
             self.assertIn("PASS: Arch Linux dependencies provisioned", result.stdout)
@@ -241,6 +244,34 @@ class ToggleCommandTests(unittest.TestCase):
             evidence = output + (log_path.read_text() if log_path.exists() else "")
             self.assertIn("waiting for Wispr Flow first login", evidence)
             self.assertIn("ready for the atlas-wispr-toggle command", evidence)
+
+
+class ClipboardBackendTests(unittest.TestCase):
+    def test_x11_clipboard_round_trip_uses_xclip(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            clipboard = tmp / "clipboard"
+            executable(
+                fake_bin / "xclip",
+                "#!/bin/sh\n"
+                f"case \"$*\" in *-o*) cat '{clipboard}' 2>/dev/null;; *) cat > '{clipboard}';; esac\n",
+            )
+            executable(fake_bin / "xdotool", "#!/bin/sh\nprintf '42\\n'\n")
+            env = dict(
+                os.environ,
+                HOME=str(tmp),
+                PATH=f"{fake_bin}:/usr/bin",
+                ATLAS_WISPR_CLIPBOARD="x11",
+            )
+            with mock.patch.dict(os.environ, env, clear=True):
+                shim = runpy.run_path(str(ROOT / "bin/wispr-focus-shim"))
+                shim["clipboard_write"]("SheaHermes X11")
+                self.assertEqual(shim["clipboard_text"](), "SheaHermes X11")
+                self.assertEqual(shim["clipboard_backend"](), "x11")
+                os.environ["XDG_SESSION_TYPE"] = "x11"
+                self.assertEqual(shim["kdotool"]("getactivewindow"), "42")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ the default KDE command-shortcut path does not.
 
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -141,7 +142,10 @@ def log(msg: str) -> None:
 
 
 def kdotool(*args: str) -> str:
-    r = subprocess.run(["kdotool", *args], capture_output=True, text=True, timeout=10)
+    forced = os.environ.get("ATLAS_WISPR_WINDOW_TOOL", "").lower()
+    session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    tool = forced or ("xdotool" if session == "x11" else "kdotool")
+    r = subprocess.run([tool, *args], capture_output=True, text=True, timeout=10)
     return r.stdout.strip()
 
 
@@ -291,12 +295,40 @@ def btn12_toggle() -> None:
 
 # ---------------- auto-paste poller ----------------
 
+def clipboard_backend() -> str:
+    forced = os.environ.get("ATLAS_WISPR_CLIPBOARD", "").lower()
+    if forced in {"wayland", "x11"}:
+        return forced
+    session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    if session == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    if session == "x11" or os.environ.get("DISPLAY"):
+        return "x11"
+    if shutil.which("wl-copy") and os.environ.get("XDG_RUNTIME_DIR"):
+        return "wayland"
+    if shutil.which("xclip"):
+        return "x11"
+    raise RuntimeError("no usable Wayland or X11 clipboard session")
+
+
 def clipboard_text() -> str:
     try:
-        r = subprocess.run(["wl-paste", "-n"], capture_output=True, text=True, timeout=3)
+        command = (["wl-paste", "-n"] if clipboard_backend() == "wayland"
+                   else ["xclip", "-selection", "clipboard", "-o"])
+        r = subprocess.run(command, capture_output=True, text=True, timeout=3)
         return r.stdout
     except Exception:
         return ""
+
+
+def clipboard_write(text: str) -> None:
+    if clipboard_backend() == "wayland":
+        subprocess.run(["wl-copy", "--", text], timeout=5, check=True)
+    else:
+        subprocess.run(
+            ["xclip", "-selection", "clipboard"], input=text,
+            text=True, timeout=5, check=True,
+        )
 
 
 def latest_formatted() -> tuple[int, str]:
@@ -353,7 +385,7 @@ def transcript_poller() -> None:
             continue
         # copy it ourselves — deterministic, no bridge, no focus-gated Wine sync
         try:
-            subprocess.run(["wl-copy", "--", text], timeout=5, check=True)
+            clipboard_write(text)
         except Exception as e:
             log(f"row {rowid}: wl-copy failed ({e}) — NOT pasting")
             continue
@@ -372,7 +404,7 @@ def transcript_poller() -> None:
             # disagreement into a dictation that silently did nothing.
             log(f"row {rowid}: read-back disagreed, re-copying and continuing")
             try:
-                subprocess.run(["wl-copy", "--", text], timeout=5)
+                clipboard_write(text)
                 time.sleep(0.25)
             except Exception as exc:
                 log(f"row {rowid}: re-copy failed ({exc})")

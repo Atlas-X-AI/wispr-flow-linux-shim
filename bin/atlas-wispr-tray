@@ -164,7 +164,12 @@ def restart_service() -> tuple[bool, str]:
 
 def missing_dependencies() -> list[str]:
     missing = []
-    for cmd in ("ydotool", "wl-copy", "wl-paste", "kdotool", "notify-send"):
+    clipboard = (("wl-copy", "wl-paste")
+                 if os.environ.get("XDG_SESSION_TYPE", "wayland") == "wayland"
+                 else ("xclip",))
+    window_tool = ("xdotool" if os.environ.get("XDG_SESSION_TYPE", "") == "x11"
+                   else "kdotool")
+    for cmd in ("ydotool", window_tool, "notify-send", *clipboard):
         if sh("which", cmd).returncode != 0:
             missing.append(cmd)
     try:

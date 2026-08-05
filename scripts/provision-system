@@ -28,7 +28,7 @@ if [ "$(uname -m)" != x86_64 ]; then
 fi
 
 sudo pacman -S --needed --noconfirm \
-    wine ydotool wl-clipboard libnotify python-evdev \
+    wine ydotool wl-clipboard xclip xdotool libnotify python-evdev \
     libayatana-appindicator python-gobject curl
 
 kdotool_version="0.2.3"

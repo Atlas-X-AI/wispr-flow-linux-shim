@@ -9,6 +9,7 @@ Exit code: 0 if nothing FAILED, 1 otherwise.
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -82,8 +83,13 @@ def check_processes() -> None:
 
 
 def check_dependencies() -> None:
-    missing = [c for c in ("ydotool", "wl-copy", "wl-paste", "kdotool", "notify-send")
+    window_tool = ("xdotool" if os.environ.get("XDG_SESSION_TYPE", "").lower() == "x11"
+                   else "kdotool")
+    missing = [c for c in ("ydotool", window_tool, "notify-send")
                if sh("which", c) and sh("which", c).returncode != 0]
+    backend = clipboard_backend()
+    clipboard_commands = (("wl-copy", "wl-paste") if backend == "wayland" else ("xclip",))
+    missing += [c for c in clipboard_commands if not shutil.which(c)]
     try:
         import evdev  # noqa: F401
     except ImportError:
@@ -163,16 +169,33 @@ def check_wispr() -> None:
         report("FAIL", "Transcript database", str(exc)[:60])
 
 
+def clipboard_backend() -> str:
+    forced = os.environ.get("ATLAS_WISPR_CLIPBOARD", "").lower()
+    if forced in {"wayland", "x11"}:
+        return forced
+    session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    if session == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    if session == "x11" or os.environ.get("DISPLAY"):
+        return "x11"
+    return "wayland" if shutil.which("wl-copy") else "x11"
+
+
 def copy_to_clipboard(text: str) -> bool:
     """wl-copy daemonises while holding the inherited pipes open, so capturing
     its output waits forever for an EOF that never arrives."""
     try:
-        subprocess.run(
-            ["wl-copy", "--", text],
-            timeout=5,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if clipboard_backend() == "wayland":
+            subprocess.run(
+                ["wl-copy", "--", text], timeout=5,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"], input=text,
+                text=True, timeout=5, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         return True
     except Exception:
         return False
@@ -180,7 +203,10 @@ def copy_to_clipboard(text: str) -> bool:
 
 def check_clipboard() -> None:
     """Round-trip a real value, then put back what was there."""
-    before = sh("wl-paste", "-n")
+    backend = clipboard_backend()
+    read_command = (("wl-paste", "-n") if backend == "wayland"
+                    else ("xclip", "-selection", "clipboard", "-o"))
+    before = sh(*read_command)
     if before is None:
         report("UNKNOWN", "Clipboard", "wl-paste did not run")
         return
@@ -188,14 +214,17 @@ def check_clipboard() -> None:
     if not copy_to_clipboard(probe):
         report("UNKNOWN", "Clipboard", "wl-copy did not run")
         return
-    after = sh("wl-paste", "-n")
+    after = sh(*read_command)
     ok = after is not None and after.stdout.strip() == probe
     if before.stdout:
         copy_to_clipboard(before.stdout)
     else:
-        subprocess.run(["wl-copy", "--clear"], timeout=5)
+        if backend == "wayland":
+            subprocess.run(["wl-copy", "--clear"], timeout=5)
+        else:
+            copy_to_clipboard("")
     report("PASS" if ok else "FAIL", "Clipboard",
-           "copy and read-back work" if ok else "a copy did not stick")
+           f"{backend} copy and read-back work" if ok else "a copy did not stick")
 
 
 def check_tray_registration() -> None:

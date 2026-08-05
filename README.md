@@ -40,7 +40,7 @@ Wine prefix and does not patch the application.
 
 ## Supported target
 
-- Arch Linux, x86-64, KDE Plasma 6, Wayland.
+- Arch Linux, x86-64, KDE Plasma 6, Wayland or X11.
 - A working microphone and an internet connection.
 
 That is the target covered by the automated installer and fresh-prefix proof.
@@ -50,12 +50,12 @@ supported.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Atlas-X-AI/wispr-flow-linux-shim/v1.1.0/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Atlas-X-AI/wispr-flow-linux-shim/v1.1.1/bootstrap.sh | bash
 ```
 
 The release is pinned, its archive checksum is verified before anything runs,
 and the installer provisions the complete supported stack: Arch packages,
-Wine, `ydotool`, a checksum-pinned `kdotool`, the official Wispr Flow Windows
+Wine, `ydotool`, Wayland and X11 clipboard/window tools, a checksum-pinned `kdotool`, the official Wispr Flow Windows
 installer, Atlas Wispr, its tray, and its enabled user services. `sudo` may ask
 for your Linux password while installing packages.
 
@@ -95,6 +95,8 @@ debugged without editing anything:
 | `WISPR_PASTE_DENY` | `systemsettings` | Window classes never auto-pasted into |
 | `WISPR_WINDOW_CLASS` | `wispr flow.exe` | Wine window class to control |
 | `YDOTOOL_SOCKET` | `/run/user/$UID/.ydotool_socket` | ydotoold socket |
+| `ATLAS_WISPR_CLIPBOARD` | auto-detected | Force `wayland` or `x11` for diagnostics |
+| `ATLAS_WISPR_WINDOW_TOOL` | auto-detected | Force `kdotool` or `xdotool` for diagnostics |
 
 **Which input device do I watch?** If a remapper (keyd, input-remapper) is
 running, it holds an exclusive grab on your physical keyboards and its virtual
@@ -135,7 +137,7 @@ monitor (loopback) device.
 
 ## Status
 
-Built and used daily on Arch Linux with KDE Plasma 6 (Wayland), Wispr Flow
+Built and used on Arch Linux with KDE Plasma 6 (Wayland and X11), Wispr Flow
 1.6.x under Wine. Reports from other distributions and compositors are welcome.
 
 ## Licence and affiliation

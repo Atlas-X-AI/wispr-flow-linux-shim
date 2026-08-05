@@ -61,7 +61,7 @@ command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || tru
 systemctl --user daemon-reload
 
 missing=()
-for c in wine ydotool wl-copy wl-paste kdotool notify-send; do
+for c in wine ydotool wl-copy wl-paste xclip xdotool kdotool notify-send; do
   command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 python3 -c "import evdev" 2>/dev/null || missing+=("python-evdev")
@@ -72,7 +72,7 @@ pgrep -x ydotoold >/dev/null 2>&1 || echo "NOTE: ydotoold is not running - key i
 if [ ${#missing[@]} -gt 0 ]; then
   echo
   echo "Missing dependencies: ${missing[*]}"
-  echo "Arch:   sudo pacman -S wine ydotool wl-clipboard kdotool libnotify python-evdev libayatana-appindicator python-gobject"
+  echo "Arch:   sudo pacman -S wine ydotool wl-clipboard xclip xdotool kdotool libnotify python-evdev libayatana-appindicator python-gobject"
   echo "Then run this installer again."
   exit 1
 fi

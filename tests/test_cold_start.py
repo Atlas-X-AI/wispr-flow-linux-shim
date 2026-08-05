@@ -86,7 +86,7 @@ class ColdStartTests(unittest.TestCase):
             self.assertTrue((tmp / ".local/bin/wispr-focus-shim").is_file())
             self.assertTrue((tmp / ".local/bin/atlas-wispr-toggle").is_file())
             release = (tmp / ".local/share/atlas-wispr/release").read_text()
-            self.assertIn("version=1.1.0", release)
+            self.assertIn("version=1.1.1", release)
             self.assertIn("revision=", release)
             self.assertIn("source_dirty=", release)
             unit = (tmp / ".config/systemd/user/wispr-focus-shim.service").read_text()
