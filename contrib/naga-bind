@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""naga-bind — bind a Razer Naga side button (1-12) to an input-remapper macro.
+
+Usage: naga-bind <side-button-1-12> "<macro>" "<name>"
+       naga-bind list
+Backs up the preset, validates the macro with input-remapper's own parser,
+writes, and reloads. Side-button N -> evdev code per the Naga's keyboard
+interface (buttons emit keyboard codes, mapped in the 'naga' preset).
+"""
+import json, shutil, subprocess, sys, time
+from pathlib import Path
+
+PRESET = Path.home() / ".config/input-remapper-2/presets/Razer Razer Naga Trinity/naga.json"
+# side button number -> input evdev code (from the live preset, 2026-08-05)
+CODES = {1: 125, 2: 15, 3: 4, 4: 28, 5: 14, 6: 7, 7: 8, 8: 9, 9: 10, 10: 11, 11: 12, 12: 13}
+
+def main():
+    data = json.load(open(PRESET))
+    if len(sys.argv) == 2 and sys.argv[1] == "list":
+        for m in data:
+            codes = [i["code"] for i in m["input_combination"]]
+            btn = next((b for b, c in CODES.items() if [c] == codes), "?")
+            print(f"btn {btn:>2} (code {codes}): {m['name']} -> {m['output_symbol']}")
+        return
+    if len(sys.argv) != 4:
+        sys.exit(__doc__)
+    btn, macro, name = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+    from inputremapper.injection.macros.parse import Parser
+    if macro != "disable":
+        Parser.parse(macro, verbose=False)  # raises on bad macro
+    bak = PRESET.with_name(PRESET.name + time.strftime(".bak-%Y%m%d-%H%M%S"))
+    shutil.copy(PRESET, bak)
+    hit = False
+    for m in data:
+        if [i["code"] for i in m["input_combination"]] == [CODES[btn]]:
+            m["output_symbol"], m["name"], hit = macro, f"Side Button {btn} -> {name}", True
+    if not hit:
+        sys.exit(f"no mapping row for side button {btn}")
+    json.dump(data, open(PRESET, "w"), indent=4)
+    subprocess.run(["input-remapper-control", "--command", "autoload"], check=True)
+    print(f"bound side button {btn}: {name} (backup: {bak.name})")
+
+main()

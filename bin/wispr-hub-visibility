@@ -1,0 +1,12 @@
+#!/bin/bash
+# Toggle the Wispr Flow Hub window between invisible (default) and visible,
+# e.g. to edit its config. Usage: wispr-hub-visibility show|hide
+case "$1" in
+  show) OP=100 ;;
+  hide) OP=0 ;;
+  *) echo "usage: wispr-hub-visibility show|hide"; exit 1 ;;
+esac
+kwriteconfig6 --file kwinrulesrc --group wispr-hub-invisible --key opacityactive "$OP"
+kwriteconfig6 --file kwinrulesrc --group wispr-hub-invisible --key opacityinactive "$OP"
+qdbus6 org.kde.KWin /KWin reconfigure
+echo "Wispr Hub now: $1"

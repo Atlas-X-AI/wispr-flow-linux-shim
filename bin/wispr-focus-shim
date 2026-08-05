@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""wispr-focus-shim - make Wispr Flow usable on Linux under Wine.
+
+Wispr Flow ships no Linux build. Run the Windows app under Wine and three
+things break:
+
+1. The global hotkey only works while a Wispr window is focused, because
+   XWayland does not forward global chords to unfocused X11 clients.
+2. Finished transcripts often fail to reach the Wayland clipboard, because
+   Wine's X11 clipboard sync is itself focus-gated - hit or miss in practice.
+3. The app cannot paste into native Wayland windows at all (it reports
+   couldNotGetTextBoxInfo), so dictation ends at "text exists somewhere".
+
+This shim fixes all three from the Linux side:
+
+- Watches the real key events (via the remapper's virtual node, since keyd or
+  input-remapper usually hold exclusive grabs on physical keyboards) for the
+  dictation chord. On a chord from any window it remembers focus, activates
+  the Wispr window, re-injects the chord, restores focus and minimises Wispr.
+- Copies every finished transcript to the Wayland clipboard itself, verified
+  by read-back, and raises a desktop notification with a preview.
+- Optional one-button flow: a spare key (default F13/F16, typically bound to a
+  mouse side button) starts recording on the first press and, on the second,
+  stops and auto-pastes the transcript plus Enter.
+
+Requires: python-evdev, ydotool + ydotoold, wl-clipboard, kdotool (KDE/KWin),
+libnotify. Read access to /dev/input (the "input" group).
+"""
+
+import os
+import subprocess
+import sys
+import threading
+import time
+import sqlite3
+from pathlib import Path
+
+import evdev
+
+def _ydotool_socket() -> str:
+    return os.environ.get(
+        "YDOTOOL_SOCKET", f"/run/user/{os.getuid()}/.ydotool_socket"
+    )
+
+
+def _find_flow_db() -> str:
+    """Locate Wispr Flow's history db inside any Wine prefix."""
+    override = os.environ.get("WISPR_FLOW_DB")
+    if override:
+        return override
+    pattern = "drive_c/users/*/AppData/Roaming/Wispr Flow/flow.sqlite"
+    home = Path.home()
+    roots = [Path(os.environ["WINEPREFIX"])] if os.environ.get("WINEPREFIX") else []
+    roots += sorted(home.glob(".wine*")) + [home / ".local/share/wineprefixes"]
+    for root in roots:
+        hits = sorted(root.glob(pattern)) + sorted(root.glob("*/" + pattern))
+        if hits:
+            return str(hits[0])
+    raise SystemExit(
+        "cannot find flow.sqlite - set WISPR_FLOW_DB or WINEPREFIX"
+    )
+
+
+YDOTOOL_SOCKET = _ydotool_socket()
+# Input nodes to watch. Physical keyboards are often exclusively grabbed by a
+# remapper (keyd, input-remapper), so the remapper's virtual node is the only
+# one carrying real keystrokes. Override with WISPR_SHIM_DEVICES="a,b".
+WATCH_NAMES = set(
+    filter(
+        None,
+        os.environ.get(
+            "WISPR_SHIM_DEVICES",
+            "keyd virtual keyboard,input-remapper keyboard",
+        ).split(","),
+    )
+)
+WISPR_CLASS = os.environ.get("WISPR_WINDOW_CLASS", "wispr flow.exe")
+# never auto-paste into these (settings pages treat Enter as "apply")
+PASTE_DENY_CLASSES = {WISPR_CLASS} | set(
+    filter(None, os.environ.get("WISPR_PASTE_DENY", "systemsettings").split(","))
+)
+FLOW_DB = _find_flow_db()
+CTRL_KEYS = {29, 97}    # KEY_LEFTCTRL, KEY_RIGHTCTRL
+META_KEYS = {125, 126}  # KEY_LEFTMETA, KEY_RIGHTMETA
+# Extra key that drives the one-button flow (default F13 + F16). Note F13 is
+# XF86Tools on many desktops and KDE launches System Settings from it.
+ONE_BUTTON_CODES = {
+    int(c)
+    for c in os.environ.get("WISPR_ONE_BUTTON_CODES", "183,186").split(",")
+    if c.strip()
+}
+DEBOUNCE_S = 0.8
+CLIP_MATCH_TIMEOUT_S = 8.0
+LOG = os.environ.get(
+    "WISPR_SHIM_LOG", str(Path.home() / ".local/state/wispr-focus-shim.log")
+)
+
+IGNORE_UNTIL = 0.0  # deaf window around our own injections (keyd echo)
+
+
+def log(msg: str) -> None:
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def kdotool(*args: str) -> str:
+    r = subprocess.run(["kdotool", *args], capture_output=True, text=True, timeout=10)
+    return r.stdout.strip()
+
+
+def ydo_key(*keyspecs: str) -> None:
+    env = dict(os.environ, YDOTOOL_SOCKET=YDOTOOL_SOCKET)
+    subprocess.run(["ydotool", "key", *keyspecs], env=env, timeout=5)
+
+
+def find_watch_devices() -> list[evdev.InputDevice]:
+    found = []
+    for path in evdev.list_devices():
+        dev = evdev.InputDevice(path)
+        if dev.name in WATCH_NAMES:
+            found.append(dev)
+        else:
+            dev.close()
+    if not found:
+        raise SystemExit(f"no watch devices found: {WATCH_NAMES}")
+    return found
+
+
+def find_wispr_window() -> str | None:
+    """Prefer the Hub (main) window; fall back to any wispr flow.exe window."""
+    fallback = None
+    for wid in kdotool("search", "--name", "").splitlines():
+        wid = wid.strip()
+        if not wid:
+            continue
+        try:
+            cls = kdotool("getwindowclassname", wid)
+        except Exception:
+            continue
+        if cls == WISPR_CLASS:
+            fallback = fallback or wid
+            if kdotool("getwindowname", wid) == "Hub":
+                return wid
+    return fallback
+
+
+def inject_chord() -> None:
+    ydo_key("29:1", "125:1")
+    time.sleep(0.15)
+    ydo_key("125:0", "29:0")
+
+
+def inject_paste() -> None:
+    """Ctrl+Shift+V — Hayden's paste chord."""
+    ydo_key("29:1", "42:1", "47:1")
+    time.sleep(0.08)
+    ydo_key("47:0", "42:0", "29:0")
+
+
+def fire(force_inject: bool = False) -> None:
+    """force_inject: the F13/button-12 path — the app never hears F13 itself,
+    so inject even when a Wispr window is focused (no focus dance needed)."""
+    global IGNORE_UNTIL
+    IGNORE_UNTIL = time.monotonic() + 2.5
+    active = kdotool("getactivewindow")
+    if active and kdotool("getwindowclassname", active) == WISPR_CLASS:
+        if force_inject:
+            inject_chord()
+            log("F13 with Wispr focused — chord injected directly")
+        else:
+            log("chord with Wispr focused — app handles it natively, no-op")
+        return
+    target = find_wispr_window()
+    if not target:
+        log("no Wispr Flow window found — is the app running?")
+        return
+    log(f"chord: focusing Wispr {target}, re-injecting, returning to {active or '?'}")
+    # KWin can refuse activation while the user is mid-interaction (proven
+    # 19:58 A/B test) — verify focus landed, retry before injecting
+    focused = False
+    for _ in range(4):
+        kdotool("windowactivate", target)
+        time.sleep(0.3)
+        if kdotool("getactivewindow") == target:
+            focused = True
+            break
+    if not focused:
+        log("could not focus Wispr after 4 tries — chord NOT delivered")
+        return
+    inject_chord()
+    time.sleep(0.30)
+    if active:
+        kdotool("windowactivate", active)
+    time.sleep(0.15)
+    try:
+        kdotool("windowminimize", target)  # never linger on screen
+    except Exception as e:
+        log(f"minimise failed (non-fatal): {e}")
+
+
+# ---------------- button-12 one-button flow (F13) ----------------
+# Button 12 emits bare KEY_F13 (code 183) via input-remapper. Press 1 = start
+# recording, press 2 = stop + arm auto-paste for the transcript that follows.
+# Start-vs-stop is read from the APP's own db, not a press counter: a recording
+# in flight leaves the newest History row with an empty status (press-counting
+# desynced against mixed button-9/keyboard use, proven 20:09).
+BTN12 = {"awaiting_since": 0.0, "last_press": 0.0}
+BTN12_LOCK = threading.Lock()
+AWAIT_WINDOW_S = 90.0  # a stop older than this never pastes
+
+
+def recording_in_flight() -> bool:
+    con = sqlite3.connect(f"file:{FLOW_DB}?mode=ro", uri=True, timeout=2)
+    try:
+        row = con.execute(
+            "SELECT status FROM History ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        return bool(row) and (row[0] is None or row[0] == "")
+    finally:
+        con.close()
+
+
+def btn12_toggle() -> None:
+    with BTN12_LOCK:
+        now = time.monotonic()
+        if now - BTN12["last_press"] < 0.5:
+            return
+        BTN12["last_press"] = now
+        try:
+            stopping = recording_in_flight()
+        except Exception as e:
+            log(f"btn12: db state read failed ({e}) — treating as start")
+            stopping = False
+        BTN12["awaiting_since"] = now if stopping else 0.0
+    log(f"button 12: {'STOP + arm auto-paste' if stopping else 'START recording'}")
+    try:
+        fire(force_inject=True)
+    except Exception as e:
+        log(f"btn12 fire failed: {e}")
+
+
+# ---------------- auto-paste poller ----------------
+
+def clipboard_text() -> str:
+    try:
+        r = subprocess.run(["wl-paste", "-n"], capture_output=True, text=True, timeout=3)
+        return r.stdout
+    except Exception:
+        return ""
+
+
+def latest_formatted() -> tuple[int, str]:
+    con = sqlite3.connect(f"file:{FLOW_DB}?mode=ro", uri=True, timeout=2)
+    try:
+        row = con.execute(
+            "SELECT rowid, formattedText FROM History "
+            "WHERE status='formatted' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        return (row[0], row[1] or "") if row else (0, "")
+    finally:
+        con.close()
+
+
+def notify(text: str) -> None:
+    preview = text if len(text) <= 160 else text[:157] + "..."
+    try:
+        subprocess.run(
+            # /usr/bin explicitly: ~/.local/bin/notify-send is a rate-limit
+            # wrapper (1/hour, silent drop) that would eat these
+            ["/usr/bin/notify-send", "-a", "Wispr Flow", "-t", "5000",
+             "Copied to clipboard — pasting", preview],
+            timeout=5,
+        )
+    except Exception as e:
+        log(f"notify failed (non-fatal): {e}")
+
+
+def transcript_poller() -> None:
+    try:
+        baseline, _ = latest_formatted()
+    except Exception as e:
+        log(f"poller: cannot read flow db at start ({e}); auto-paste disabled")
+        return
+    log(f"auto-paste poller up, baseline transcript row {baseline}")
+    while True:
+        time.sleep(0.15)
+        try:
+            rowid, text = latest_formatted()
+        except Exception:
+            continue  # db busy/locked — try again
+        if rowid <= baseline:
+            continue
+        baseline = rowid
+        if not text.strip():
+            log(f"row {rowid}: empty transcript, skipping")
+            continue
+        # copy it ourselves — deterministic, no bridge, no focus-gated Wine sync
+        try:
+            subprocess.run(["wl-copy", "--", text], timeout=5, check=True)
+        except Exception as e:
+            log(f"row {rowid}: wl-copy failed ({e}) — NOT pasting")
+            continue
+        if clipboard_text().strip() != text.strip():
+            log(f"row {rowid}: clipboard read-back mismatch")
+            notify(text)
+            continue
+        threading.Thread(target=notify, args=(text,), daemon=True).start()
+        log(f"row {rowid}: copied to clipboard ({len(text)} chars), notify dispatched")
+        # button-12 one-button flow: paste + Enter for the transcript that
+        # follows its stop press (other stop paths stay copy-only)
+        with BTN12_LOCK:
+            armed = BTN12["awaiting_since"]
+            fresh = bool(armed) and (time.monotonic() - armed) < AWAIT_WINDOW_S
+            BTN12["awaiting_since"] = 0.0  # consumed or stale either way
+        if not fresh:
+            continue
+        # wait for focus to leave Wispr (stop-fire refocus may be mid-flight)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            active = kdotool("getactivewindow")
+            if not active or kdotool("getwindowclassname", active) not in PASTE_DENY_CLASSES:
+                break
+            time.sleep(0.3)
+        else:
+            log(f"row {rowid}: focus stayed on a deny-listed window — copied only, no paste")
+            continue
+        inject_paste()
+        time.sleep(0.30)
+        ydo_key("28:1", "28:0")  # Enter
+        log(f"row {rowid}: auto-pasted + Enter ({len(text)} chars)")
+
+
+# ---------------- chord watcher ----------------
+
+FIRE_LOCK = threading.Lock()
+LAST_FIRE = [0.0]  # shared across device threads
+
+
+def chord_loop(dev: evdev.InputDevice) -> None:
+    log(f"watching {dev.path} ({dev.name}); chord = bare Ctrl+Meta")
+    pressed: set[int] = set()
+    chord_keys: set[int] = set()
+    dirty = False  # a non-chord key joined — abort this chord
+    for event in dev.read_loop():
+        if event.type != evdev.ecodes.EV_KEY:
+            continue
+        code, val = event.code, event.value
+        if code in ONE_BUTTON_CODES:  # one-button record/stop+paste key
+            if val == 1:
+                btn12_toggle()
+            continue
+        if val == 1:  # press
+            pressed.add(code)
+            if code in CTRL_KEYS or code in META_KEYS:
+                chord_keys.add(code)
+            else:
+                dirty = True
+        elif val == 0:  # release
+            pressed.discard(code)
+            if not pressed:
+                had_ctrl = bool(chord_keys & CTRL_KEYS)
+                had_meta = bool(chord_keys & META_KEYS)
+                if had_ctrl and had_meta and not dirty:
+                    now = time.monotonic()
+                    if now < IGNORE_UNTIL:
+                        log("chord ignored (self-injection window)")
+                    else:
+                        with FIRE_LOCK:
+                            ok = now - LAST_FIRE[0] >= DEBOUNCE_S
+                            if ok:
+                                LAST_FIRE[0] = now
+                        if ok:
+                            try:
+                                fire()
+                            except Exception as e:  # keep the watcher alive
+                                log(f"fire failed: {e}")
+                chord_keys.clear()
+                dirty = False
+
+
+def main() -> None:
+    devs = find_watch_devices()
+    threading.Thread(target=transcript_poller, daemon=True).start()
+    threads = [threading.Thread(target=chord_loop, args=(d,), daemon=True) for d in devs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
