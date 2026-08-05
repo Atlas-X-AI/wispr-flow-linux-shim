@@ -21,6 +21,9 @@ Wine prefix and does not patch the application.
   keyboard, toggle auto-paste and notifications, hide or show the Wispr window,
   start and stop dictation. A first-run wizard checks your dependencies and
   walks you through setup.
+- **One cold-start path.** Starting Atlas Wispr also starts Wispr Flow under
+  Wine when it is not already running. The app, listener and tray return at
+  login without a separate launch step.
 
 - **Dictation from any window.** Press your chord anywhere. The shim remembers
   the focused window, activates Wispr, re-injects the chord, restores your
@@ -39,7 +42,7 @@ Wine prefix and does not patch the application.
 
 - Wayland compositor. Window control uses `kdotool`, so KDE Plasma / KWin is
   the tested target.
-- `python-evdev`, `ydotool` + a running `ydotoold`, `wl-clipboard`, `kdotool`,
+- Wine, `python-evdev`, `ydotool` + a running `ydotoold`, `wl-clipboard`, `kdotool`,
   `libnotify`.
 - Your user in the `input` group (read access to `/dev/input`).
 
@@ -49,13 +52,13 @@ Wine prefix and does not patch the application.
 git clone https://github.com/Atlas-X-AI/wispr-flow-linux-shim
 cd wispr-flow-linux-shim
 ./install.sh
-atlas-wispr-tray &
 ```
 
 The installer checks every dependency and tells you exactly what to install if
-something is missing. The tray then opens a setup wizard on first run: pick your
-keyboard, press the key you want for dictation, done. It starts automatically at
-login from then on.
+something is missing. That one command installs and starts the complete stack.
+The tray opens a setup wizard on first run: pick your keyboard, press the key
+you want for dictation, done. Atlas Wispr and Wispr Flow start together at login
+from then on.
 
 Then, once, allow XWayland to receive global chords so the Wine app can hear
 its own hotkey (KDE Plasma):
@@ -76,9 +79,10 @@ debugged without editing anything:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WISPR_FLOW_DB` | auto-discovered | Path to `flow.sqlite` in the Wine prefix |
+| `WISPR_FLOW_EXE` | auto-discovered | Path to `Wispr Flow.exe` when the Wine prefix is unusual |
 | `WINEPREFIX` | `~/.wine*` | Searched when auto-discovering the database |
 | `WISPR_SHIM_DEVICES` | `keyd virtual keyboard,input-remapper keyboard` | Input nodes to watch |
-| `WISPR_ONE_BUTTON_CODES` | `183,186` (F13, F16) | Keys driving the one-button flow |
+| `WISPR_ONE_BUTTON_CODES` | `186` (F16) | Keys driving the one-button flow |
 | `WISPR_PASTE_DENY` | `systemsettings` | Window classes never auto-pasted into |
 | `WISPR_WINDOW_CLASS` | `wispr flow.exe` | Wine window class to control |
 | `YDOTOOL_SOCKET` | `/run/user/$UID/.ydotool_socket` | ydotoold socket |
@@ -97,6 +101,7 @@ window. F16 is unbound on a stock system.
 ```sh
 atlas-wispr-doctor            # what is wrong?
 atlas-wispr-doctor --restart  # stop every copy, start exactly one, re-check
+atlas-wispr-doctor --version  # installed version, source commit, dirty state
 ```
 
 Checks the things that actually break dictation - duplicate or missing

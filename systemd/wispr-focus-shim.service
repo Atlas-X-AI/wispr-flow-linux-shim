@@ -3,6 +3,7 @@ Description=Wispr Flow focus shim - hotkey relay, clipboard copy, notifications
 After=graphical-session.target
 
 [Service]
+ExecStartPre=%h/.local/bin/atlas-wispr-launch-flow --wait-seconds 30
 ExecStart=%h/.local/bin/wispr-focus-shim
 Restart=on-failure
 RestartSec=3

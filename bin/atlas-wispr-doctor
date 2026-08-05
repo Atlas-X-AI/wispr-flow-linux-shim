@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+RELEASE_PATH = Path.home() / ".local/share/atlas-wispr/release"
+
 CONFIG_PATH = Path(
     os.environ.get(
         "WISPR_SHIM_CONFIG", str(Path.home() / ".config/wispr-shim/config.json")
@@ -242,23 +244,34 @@ def restart_everything() -> None:
                 pass
         print(f"  stopped  {needle}")
 
-    home_bin = Path.home() / ".local/bin"
-    for needle in ("wispr-focus-shim", "atlas-wispr-tray"):
-        exe = home_bin / needle
-        if not exe.exists():
-            print(f"  MISSING  {exe} - run install.sh")
-            continue
+    unit = sh("systemctl", "--user", "restart", "wispr-focus-shim.service")
+    if unit is None or unit.returncode != 0:
+        detail = unit.stderr.strip() if unit else "systemctl did not run"
+        print(f"  FAILED   dictation service: {detail}")
+    else:
+        print("  started  wispr-focus-shim.service (including Wispr Flow cold-start)")
+
+    tray = Path.home() / ".local/bin/atlas-wispr-tray"
+    if not tray.exists():
+        print(f"  MISSING  {tray} - run install.sh")
+    else:
         subprocess.Popen(
-            [sys.executable, str(exe)],
+            [sys.executable, str(tray)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        print(f"  started  {needle}")
+        print("  started  atlas-wispr-tray")
     time.sleep(3)
 
 
 def main() -> int:
+    if "--version" in sys.argv:
+        if RELEASE_PATH.exists():
+            print(RELEASE_PATH.read_text().strip())
+            return 0
+        print("Atlas Wispr release provenance is UNKNOWN", file=sys.stderr)
+        return 1
     if "--restart" in sys.argv:
         restart_everything()
     print("\nAtlas Wispr - health check\n")

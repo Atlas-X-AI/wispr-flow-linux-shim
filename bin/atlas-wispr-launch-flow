@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Start Wispr Flow under Wine if it is not already running.
+
+This is the single cold-start seam used by the systemd unit and the installer.
+It reads the live Wine prefixes each time, so an application update does not
+leave a stored executable path behind.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+PROCESS_NEEDLE = b"Wispr Flow.exe"
+
+
+def process_running() -> bool:
+    proc_root = Path(os.environ.get("ATLAS_WISPR_PROC_ROOT", "/proc"))
+    for cmdline in proc_root.glob("[0-9]*/cmdline"):
+        try:
+            if PROCESS_NEEDLE in cmdline.read_bytes():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def wine_prefixes() -> list[Path]:
+    home = Path.home()
+    roots: list[Path] = []
+    if os.environ.get("WINEPREFIX"):
+        roots.append(Path(os.environ["WINEPREFIX"]).expanduser())
+    roots.append(home / ".wine-whisperflow")
+    roots.extend(sorted(home.glob(".wine*")))
+    roots.extend(sorted((home / ".local/share/wineprefixes").glob("*")))
+    return list(dict.fromkeys(roots))
+
+
+def find_executable() -> Path | None:
+    override = os.environ.get("WISPR_FLOW_EXE")
+    if override:
+        candidate = Path(override).expanduser()
+        return candidate if candidate.is_file() else None
+
+    patterns = (
+        "drive_c/users/*/AppData/Local/WisprFlow/Wispr Flow.exe",
+        "drive_c/Program Files/WisprFlow/Wispr Flow.exe",
+        "drive_c/Program Files/WhisperFlow/lib/net45/Wispr Flow.exe",
+    )
+    for prefix in wine_prefixes():
+        for pattern in patterns:
+            matches = sorted(prefix.glob(pattern))
+            if matches:
+                return matches[0]
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--wait-seconds", type=float, default=30.0)
+    args = parser.parse_args()
+
+    if process_running():
+        print("Wispr Flow already running")
+        return 0
+
+    executable = find_executable()
+    if executable is None:
+        print(
+            "Atlas Wispr could not find Wispr Flow.exe. Set WISPR_FLOW_EXE or "
+            "install Wispr Flow in a Wine prefix.",
+            file=sys.stderr,
+        )
+        return 1
+
+    env = dict(os.environ)
+    prefix = executable
+    while prefix.name != "drive_c" and prefix != prefix.parent:
+        prefix = prefix.parent
+    if prefix.name == "drive_c":
+        env["WINEPREFIX"] = str(prefix.parent)
+
+    try:
+        subprocess.Popen(
+            ["wine", str(executable)],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Atlas Wispr could not launch Wispr Flow: {exc}", file=sys.stderr)
+        return 1
+
+    deadline = time.monotonic() + max(0.0, args.wait_seconds)
+    while time.monotonic() < deadline:
+        if process_running():
+            print(f"Wispr Flow started from {executable}")
+            return 0
+        time.sleep(0.2)
+    print("Wispr Flow launch timed out before its process appeared", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
