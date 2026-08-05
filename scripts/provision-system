@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install every Linux-side dependency on the supported Arch/KDE target.
+# Provision the runtime without upgrading or replacing the host operating system.
 set -euo pipefail
 export PATH="${HOME}/.local/bin:${PATH}"
 
@@ -11,36 +11,38 @@ os_release="${ATLAS_WISPR_OS_RELEASE:-/etc/os-release}"
 # shellcheck disable=SC1090
 . "$os_release"
 
-if ! command -v pacman >/dev/null 2>&1 || [ "${ID:-}" != arch ]; then
+if [ "${ID:-}" != arch ]; then
     printf 'FAIL: the one-command installer currently supports Arch Linux only.\n' >&2
     printf 'UNKNOWN: this distribution has not completed the fresh-machine proof.\n' >&2
     exit 1
 fi
-
-command -v sudo >/dev/null 2>&1 || {
-    printf 'FAIL: sudo is required to install the Arch Linux packages.\n' >&2
-    exit 1
-}
 
 if [ "$(uname -m)" != x86_64 ]; then
     printf 'FAIL: Atlas Wispr currently supports x86-64 computers only.\n' >&2
     exit 1
 fi
 
-# Arch does not support partial upgrades. -Syu refreshes stale package metadata
-# and upgrades the base before adding dependencies, so old mirror filenames can
-# never turn a clean bootstrap into a misleading application failure.
-sudo pacman -Syu --needed --noconfirm \
-    wine ydotool wl-clipboard xclip xdotool libnotify python-evdev \
-    libayatana-appindicator python-gobject curl
+missing=()
+for command in curl tar sha256sum python3 systemctl ydotool \
+    wl-copy wl-paste xclip xdotool notify-send; do
+    command -v "$command" >/dev/null 2>&1 || missing+=("$command")
+done
+python3 -c "import gi; gi.require_version('AyatanaAppIndicator3','0.1')" \
+    >/dev/null 2>&1 || missing+=("python-gobject/libayatana-appindicator")
+if [ "${#missing[@]}" -gt 0 ]; then
+    printf 'FAIL: this Linux base is missing: %s\n' "${missing[*]}" >&2
+    printf 'UNKNOWN: blank-Arch dependency provisioning is not yet proven; no packages were changed.\n' >&2
+    exit 1
+fi
+
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/atlas-wispr-runtime.XXXXXX")"
+trap 'rm -rf -- "$tmpdir"' EXIT
 
 kdotool_version="0.2.3"
 kdotool_url="${ATLAS_WISPR_KDOTOOL_URL:-https://github.com/jinliu/kdotool/releases/download/v${kdotool_version}/kdotool-${kdotool_version}-x86_64-unknown-linux-gnu.tar.gz}"
 kdotool_sha="${ATLAS_WISPR_KDOTOOL_SHA256:-a30c09175d1c4180afa394e8ccbf61c8780d79845a2ed89c9f39f7804a5b1433}"
 
 if ! command -v kdotool >/dev/null 2>&1 || [ "${ATLAS_WISPR_FORCE_KDOTOOL_INSTALL:-0}" = 1 ]; then
-    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/atlas-wispr-kdotool.XXXXXX")"
-    trap 'rm -rf -- "$tmpdir"' EXIT
     curl -fsSL --retry 3 "$kdotool_url" -o "${tmpdir}/kdotool.tar.gz"
     printf '%s  %s\n' "$kdotool_sha" "${tmpdir}/kdotool.tar.gz" | sha256sum --check --strict
     tar -xzf "${tmpdir}/kdotool.tar.gz" -C "$tmpdir" kdotool
@@ -48,6 +50,35 @@ if ! command -v kdotool >/dev/null 2>&1 || [ "${ATLAS_WISPR_FORCE_KDOTOOL_INSTAL
     install -m 755 "${tmpdir}/kdotool" "${HOME}/.local/bin/kdotool"
 fi
 
+wine_version="11.14"
+wine_name="wine-${wine_version}-amd64-wow64"
+wine_url="${ATLAS_WISPR_WINE_URL:-https://github.com/Kron4ek/Wine-Builds/releases/download/${wine_version}/${wine_name}.tar.xz}"
+wine_sha="${ATLAS_WISPR_WINE_SHA256:-707956fa1574ad1660c4d7f2cfd9c024e0f437ad0a2d501a53b717adb1288222}"
+wine_root="${HOME}/.local/opt/atlas-wispr/${wine_name}"
+
+if ! command -v wine >/dev/null 2>&1 || [ "${ATLAS_WISPR_FORCE_WINE_INSTALL:-0}" = 1 ]; then
+    curl -fL --retry 3 "$wine_url" -o "${tmpdir}/wine.tar.xz"
+    printf '%s  %s\n' "$wine_sha" "${tmpdir}/wine.tar.xz" | sha256sum --check --strict
+    tar -xJf "${tmpdir}/wine.tar.xz" -C "$tmpdir"
+    extracted="${tmpdir}/${wine_name}"
+    [ -x "${extracted}/bin/wine" ] || {
+        printf 'FAIL: verified Wine archive did not contain %s/bin/wine.\n' "$wine_name" >&2
+        exit 1
+    }
+    mkdir -p "$(dirname "$wine_root")" "${HOME}/.local/bin"
+    if [ -e "$wine_root" ]; then
+        mv "$wine_root" "${wine_root}.previous.$(date +%s)"
+    fi
+    mv "$extracted" "$wine_root"
+    for command in wine wineboot wineserver; do
+        ln -sfn "$wine_root/bin/$command" "${HOME}/.local/bin/$command"
+    done
+    "${HOME}/.local/bin/wine" --version >/dev/null
+    printf 'PASS: portable Wine installed and verified\n'
+else
+    printf 'PASS: existing Wine runtime retained\n'
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable --now ydotool.service
-printf 'PASS: Arch Linux dependencies provisioned\n'
+printf 'PASS: Atlas Wispr runtime provisioned without a system upgrade\n'

@@ -81,7 +81,7 @@ class BootstrapTests(unittest.TestCase):
 
 
 class ProvisioningTests(unittest.TestCase):
-    def test_arch_provisioner_installs_packages_verified_kdotool_and_ydotool_service(self) -> None:
+    def test_arch_provisioner_installs_portable_wine_verified_kdotool_and_ydotool_service(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             home = tmp / "home"
@@ -92,7 +92,7 @@ class ProvisioningTests(unittest.TestCase):
             (tmp / "os-release").write_text("ID=arch\n")
 
             executable(fake_bin / "sudo", f"#!/bin/sh\nprintf 'sudo:%s\\n' \"$*\" >> '{log}'\n")
-            executable(fake_bin / "pacman", "#!/bin/sh\nexit 0\n")
+            executable(fake_bin / "pacman", f"#!/bin/sh\nprintf 'pacman:%s\\n' \"$*\" >> '{log}'\n")
             executable(fake_bin / "systemctl", f"#!/bin/sh\nprintf 'systemctl:%s\\n' \"$*\" >> '{log}'\n")
             executable(fake_bin / "kdotool", "#!/bin/sh\nexit 1\n")
 
@@ -103,6 +103,14 @@ class ProvisioningTests(unittest.TestCase):
                 bundle.add(payload, arcname="kdotool")
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
 
+            wine_root = tmp / "wine-11.14-amd64-wow64"
+            for command in ("wine", "wineboot", "wineserver"):
+                executable(wine_root / "bin" / command, "#!/bin/sh\nexit 0\n")
+            wine_archive = tmp / "wine.tar.xz"
+            with tarfile.open(wine_archive, "w:xz") as bundle:
+                bundle.add(wine_root, arcname=wine_root.name)
+            wine_digest = hashlib.sha256(wine_archive.read_bytes()).hexdigest()
+
             env = dict(
                 os.environ,
                 HOME=str(home),
@@ -111,6 +119,9 @@ class ProvisioningTests(unittest.TestCase):
                 ATLAS_WISPR_KDOTOOL_URL=f"file://{archive}",
                 ATLAS_WISPR_KDOTOOL_SHA256=digest,
                 ATLAS_WISPR_FORCE_KDOTOOL_INSTALL="1",
+                ATLAS_WISPR_WINE_URL=f"file://{wine_archive}",
+                ATLAS_WISPR_WINE_SHA256=wine_digest,
+                ATLAS_WISPR_FORCE_WINE_INSTALL="1",
             )
             result = subprocess.run(
                 [str(ROOT / "scripts/provision-system")],
@@ -120,11 +131,12 @@ class ProvisioningTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             calls = log.read_text()
-            self.assertIn("sudo:pacman -Syu --needed --noconfirm", calls)
-            self.assertIn("xclip", calls)
+            self.assertNotIn("pacman", calls)
             self.assertIn("systemctl:--user enable --now ydotool.service", calls)
             self.assertTrue((home / ".local/bin/kdotool").is_file())
-            self.assertIn("PASS: Arch Linux dependencies provisioned", result.stdout)
+            self.assertTrue((home / ".local/bin/wine").exists())
+            self.assertIn("PASS: portable Wine installed", result.stdout)
+            self.assertIn("PASS: Atlas Wispr runtime provisioned", result.stdout)
 
     def test_provisioner_fails_loudly_on_an_unsupported_distribution(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

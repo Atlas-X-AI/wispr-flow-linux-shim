@@ -64,7 +64,6 @@ missing=()
 for c in wine ydotool wl-copy wl-paste xclip xdotool kdotool notify-send; do
   command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
-python3 -c "import evdev" 2>/dev/null || missing+=("python-evdev")
 python3 -c "import gi; gi.require_version('AyatanaAppIndicator3','0.1')" 2>/dev/null \
   || missing+=("libayatana-appindicator (python bindings)")
 pgrep -x ydotoold >/dev/null 2>&1 || echo "NOTE: ydotoold is not running - key injection will fail until it is."
@@ -72,7 +71,7 @@ pgrep -x ydotoold >/dev/null 2>&1 || echo "NOTE: ydotoold is not running - key i
 if [ ${#missing[@]} -gt 0 ]; then
   echo
   echo "Missing dependencies: ${missing[*]}"
-  echo "Arch:   sudo pacman -S wine ydotool wl-clipboard xclip xdotool kdotool libnotify python-evdev libayatana-appindicator python-gobject"
+  echo "This Hermes base is incomplete. No packages were changed; see the missing list above."
   echo "Then run this installer again."
   exit 1
 fi

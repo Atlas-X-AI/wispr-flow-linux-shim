@@ -28,6 +28,8 @@ libnotify. Direct evdev watching additionally needs read access to /dev/input;
 the default KDE command-shortcut path does not.
 """
 
+from __future__ import annotations
+
 import os
 import signal
 import shutil
@@ -40,7 +42,10 @@ import json
 import sqlite3
 from pathlib import Path
 
-import evdev
+try:
+    import evdev
+except ImportError:  # command-shortcut mode does not need raw input access
+    evdev = None
 
 def _ydotool_socket() -> str:
     return os.environ.get(
@@ -157,6 +162,8 @@ def ydo_key(*keyspecs: str) -> None:
 def find_watch_devices() -> list[evdev.InputDevice]:
     if not WATCH_NAMES:
         return []
+    if evdev is None:
+        raise RuntimeError("evdev is required when raw input devices are configured")
     found = []
     for path in evdev.list_devices():
         dev = evdev.InputDevice(path)

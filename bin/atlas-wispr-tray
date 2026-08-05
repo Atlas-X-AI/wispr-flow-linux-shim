@@ -172,10 +172,6 @@ def missing_dependencies() -> list[str]:
     for cmd in ("ydotool", window_tool, "notify-send", *clipboard):
         if sh("which", cmd).returncode != 0:
             missing.append(cmd)
-    try:
-        import evdev  # noqa: F401
-    except ImportError:
-        missing.append("python-evdev")
     if sh("pgrep", "-x", "ydotoold").returncode != 0:
         missing.append("ydotoold (not running)")
     groups = sh("id", "-nG").stdout.split()
