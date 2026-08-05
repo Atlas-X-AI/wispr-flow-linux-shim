@@ -8,6 +8,7 @@ window transparency toggle, and a first-run setup wizard. Uses AyatanaAppIndicat
 Everything it changes is written to ~/.config/wispr-shim/config.json and applied
 by restarting the shim service, so the tray never has to talk to the daemon.
 """
+import fcntl
 import json
 import os
 import subprocess
@@ -35,7 +36,7 @@ COPPER = "#C9924A"
 
 DEFAULTS = {
     "devices": ["keyd virtual keyboard", "input-remapper keyboard"],
-    "one_button_codes": [183, 186],
+    "one_button_codes": [186],
     "paste_deny_classes": ["systemsettings"],
     "window_class": "wispr flow.exe",
     "auto_paste": True,
@@ -648,6 +649,21 @@ class OnboardingWindow(Gtk.Assistant):
         self.destroy()
 
 
+def acquire_tray_lock():
+    """One tray only. Two trays mean two icons and two menus fighting."""
+    path = Path.home() / ".local/state/atlas-wispr-tray.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Atlas Wispr tray is already running", flush=True)
+        raise SystemExit(0)
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
 class AtlasWisprTray:
     def __init__(self) -> None:
         self.indicator = AppIndicator.Indicator.new(
@@ -687,6 +703,7 @@ class AtlasWisprTray:
         self.menu.append(Gtk.SeparatorMenuItem())
         for label, cb in (
             ("Settings...", self.on_settings),
+            ("Restart dictation", self.on_restart),
             ("Run setup again...", self.on_onboarding),
         ):
             item = Gtk.MenuItem(label=label)
@@ -719,6 +736,12 @@ class AtlasWisprTray:
     def on_toggle_visibility(self, item) -> None:
         set_transparency(item.get_active())
 
+    def on_restart(self, _item) -> None:
+        ok, detail = restart_service()
+        self.refresh()
+        if not ok:
+            dialog(None, "error", "Could not restart dictation", "", detail)
+
     def on_settings(self, _item) -> None:
         if self.settings_window and self.settings_window.get_realized():
             self.settings_window.present()
@@ -749,6 +772,7 @@ class AtlasWisprTray:
 if __name__ == "__main__":
     tray = None
     try:
+        _tray_lock = acquire_tray_lock()  # noqa: F841 - held until exit
         tray = AtlasWisprTray()
         if not CONFIG_PATH.exists():
             GLib.idle_add(lambda: (OnboardingWindow(tray), False)[1])

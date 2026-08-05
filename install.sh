@@ -14,6 +14,7 @@ mkdir -p "$BIN" "$UNITS" "$APPS" "$AUTOSTART" "${HOME}/.local/state"
 install -m 755 "$here/bin/wispr-focus-shim"     "$BIN/wispr-focus-shim"
 install -m 755 "$here/bin/wispr-hub-visibility" "$BIN/wispr-hub-visibility"
 install -m 755 "$here/bin/atlas-wispr-tray"     "$BIN/atlas-wispr-tray"
+install -m 755 "$here/bin/atlas-wispr-doctor"   "$BIN/atlas-wispr-doctor"
 install -m 644 "$here/systemd/wispr-focus-shim.service" "$UNITS/wispr-focus-shim.service"
 install -m 644 "$here/desktop/atlas-wispr-tray.desktop" "$APPS/atlas-wispr-tray.desktop"
 install -m 644 "$here/desktop/atlas-wispr-tray.desktop" "$AUTOSTART/atlas-wispr-tray.desktop"
@@ -54,3 +55,4 @@ fi
 echo
 echo "Installed. Start the tray now with:   atlas-wispr-tray &"
 echo "It will walk you through setup, and start automatically at login from here on."
+echo "If anything ever misbehaves, run:   atlas-wispr-doctor"

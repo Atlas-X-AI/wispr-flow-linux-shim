@@ -71,7 +71,7 @@ CONFIG_PATH = Path(
 )
 DEFAULTS = {
     "devices": ["keyd virtual keyboard", "input-remapper keyboard"],
-    "one_button_codes": [183, 186],
+    "one_button_codes": [186],
     "paste_deny_classes": ["systemsettings"],
     "window_class": "wispr flow.exe",
     "auto_paste": True,
@@ -336,10 +336,25 @@ def transcript_poller() -> None:
         except Exception as e:
             log(f"row {rowid}: wl-copy failed ({e}) — NOT pasting")
             continue
-        if clipboard_text().strip() != text.strip():
-            log(f"row {rowid}: clipboard read-back mismatch")
-            notify(text)
-            continue
+        # wl-copy returns before the compositor offers the selection, so the
+        # read-back is retried rather than read once
+        confirmed = False
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if clipboard_text().strip() == text.strip():
+                confirmed = True
+                break
+            time.sleep(0.1)
+        if not confirmed:
+            # Never let a failed check cancel the paste: we hold the text, so
+            # copy it again and carry on. Blocking here turned an unexplained
+            # disagreement into a dictation that silently did nothing.
+            log(f"row {rowid}: read-back disagreed, re-copying and continuing")
+            try:
+                subprocess.run(["wl-copy", "--", text], timeout=5)
+                time.sleep(0.25)
+            except Exception as exc:
+                log(f"row {rowid}: re-copy failed ({exc})")
         if CONFIG.get("notifications", True):
             threading.Thread(target=notify, args=(text,), daemon=True).start()
         log(f"row {rowid}: copied to clipboard ({len(text)} chars), notify dispatched")

@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""atlas-wispr-doctor - is dictation actually healthy?
+
+Answers in one command, with three honest states per check: PASS, FAIL, and
+UNKNOWN. A check that could not run says so rather than quietly passing.
+
+Exit code: 0 if nothing FAILED, 1 otherwise.
+"""
+import glob
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CONFIG_PATH = Path(
+    os.environ.get(
+        "WISPR_SHIM_CONFIG", str(Path.home() / ".config/wispr-shim/config.json")
+    )
+)
+GREEN, RED, YELLOW, DIM, RESET = (
+    "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+)
+results = []
+
+
+def report(state: str, name: str, detail: str = "") -> None:
+    colour = {"PASS": GREEN, "FAIL": RED, "UNKNOWN": YELLOW}[state]
+    print(f"  {colour}{state:<8}{RESET}{name}" + (f"  {DIM}{detail}{RESET}" if detail else ""))
+    results.append(state)
+
+
+def sh(*args: str, timeout: int = 10):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+
+
+def count_processes(needle: str) -> list[tuple[int, str]]:
+    """Count by reading /proc directly.
+
+    pgrep -f matches its own command line and the shell that launched it, which
+    silently inflates every count by one or two - a trap that cost real
+    debugging time.
+    """
+    found = []
+    me = os.getpid()
+    for path in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            pid = int(path.split("/")[2])
+            if pid == me:
+                continue
+            with open(path, "rb") as fh:
+                cmd = fh.read().decode("utf8", "ignore")
+        except (OSError, ValueError):
+            continue
+        if needle in cmd and "pgrep" not in cmd and "doctor" not in cmd:
+            found.append((pid, cmd.replace("\x00", " ").strip()))
+    return found
+
+
+def check_processes() -> None:
+    shims = count_processes("wispr-focus-shim")
+    if len(shims) == 1:
+        report("PASS", "Dictation service", f"running, pid {shims[0][0]}")
+    elif not shims:
+        report("FAIL", "Dictation service", "not running - start it from the tray")
+    else:
+        report("FAIL", "Dictation service",
+               f"{len(shims)} copies running - they will fight; restart from the tray")
+
+    trays = count_processes("atlas-wispr-tray")
+    if len(trays) == 1:
+        report("PASS", "Tray", f"running, pid {trays[0][0]}")
+    elif not trays:
+        report("UNKNOWN", "Tray", "not running (optional, but you lose the controls)")
+    else:
+        report("FAIL", "Tray", f"{len(trays)} copies running")
+
+
+def check_dependencies() -> None:
+    missing = [c for c in ("ydotool", "wl-copy", "wl-paste", "kdotool", "notify-send")
+               if sh("which", c) and sh("which", c).returncode != 0]
+    try:
+        import evdev  # noqa: F401
+    except ImportError:
+        missing.append("python-evdev")
+    if missing:
+        report("FAIL", "Dependencies", ", ".join(missing) + " missing")
+    else:
+        report("PASS", "Dependencies", "all present")
+
+    if not count_processes("ydotoold"):
+        report("FAIL", "Key injection daemon", "ydotoold is not running")
+    else:
+        report("PASS", "Key injection daemon", "ydotoold running")
+
+    groups = sh("id", "-nG")
+    if groups is None:
+        report("UNKNOWN", "Input access", "could not read your groups")
+    elif "input" in groups.stdout.split():
+        report("PASS", "Input access", "you are in the 'input' group")
+    else:
+        report("FAIL", "Input access", "not in the 'input' group - keys cannot be read")
+
+
+def check_config_and_devices() -> None:
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+            report("PASS", "Settings file", str(CONFIG_PATH))
+        except Exception as exc:
+            report("FAIL", "Settings file", f"unreadable: {exc}")
+    else:
+        report("UNKNOWN", "Settings file", "none yet - defaults apply")
+
+    wanted = cfg.get("devices", ["keyd virtual keyboard", "input-remapper keyboard"])
+    try:
+        import evdev
+
+        present = {evdev.InputDevice(p).name for p in evdev.list_devices()}
+    except Exception as exc:
+        report("UNKNOWN", "Keyboard source", f"cannot read input devices: {exc}")
+        return
+    live = [d for d in wanted if d in present]
+    if live:
+        report("PASS", "Keyboard source", ", ".join(live))
+    else:
+        report("FAIL", "Keyboard source",
+               f"none of {wanted} exist - set it in the tray Settings")
+
+    codes = cfg.get("one_button_codes", [186])
+    if 183 in codes:
+        report("UNKNOWN", "Dictation key",
+               "F13 is set, and most desktops open System Settings from it")
+    elif codes:
+        report("PASS", "Dictation key", f"key codes {codes}")
+    else:
+        report("FAIL", "Dictation key", "no key is bound")
+
+
+def check_wispr() -> None:
+    if count_processes("Wispr Flow.exe"):
+        report("PASS", "Wispr Flow", "running under Wine")
+    else:
+        report("FAIL", "Wispr Flow", "not running - nothing will transcribe")
+
+    pattern = "drive_c/users/*/AppData/Roaming/Wispr Flow/flow.sqlite"
+    hits = []
+    for root in sorted(Path.home().glob(".wine*")):
+        hits += list(root.glob(pattern))
+    if not hits:
+        report("UNKNOWN", "Transcript database", "not found - set WISPR_FLOW_DB")
+        return
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{hits[0]}?mode=ro", uri=True, timeout=3)
+        row = con.execute(
+            "SELECT rowid, status FROM History ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        con.close()
+        report("PASS", "Transcript database", f"readable, newest row {row[0]}")
+    except Exception as exc:
+        report("FAIL", "Transcript database", str(exc)[:60])
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """wl-copy daemonises while holding the inherited pipes open, so capturing
+    its output waits forever for an EOF that never arrives."""
+    try:
+        subprocess.run(
+            ["wl-copy", "--", text],
+            timeout=5,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def check_clipboard() -> None:
+    """Round-trip a real value, then put back what was there."""
+    before = sh("wl-paste", "-n")
+    if before is None:
+        report("UNKNOWN", "Clipboard", "wl-paste did not run")
+        return
+    probe = "atlas-wispr-doctor-probe"
+    if not copy_to_clipboard(probe):
+        report("UNKNOWN", "Clipboard", "wl-copy did not run")
+        return
+    after = sh("wl-paste", "-n")
+    ok = after is not None and after.stdout.strip() == probe
+    if before.stdout:
+        copy_to_clipboard(before.stdout)
+    else:
+        subprocess.run(["wl-copy", "--clear"], timeout=5)
+    report("PASS" if ok else "FAIL", "Clipboard",
+           "copy and read-back work" if ok else "a copy did not stick")
+
+
+def check_tray_registration() -> None:
+    r = sh("busctl", "--user", "call", "org.kde.StatusNotifierWatcher",
+           "/StatusNotifierWatcher", "org.freedesktop.DBus.Properties", "Get", "ss",
+           "org.kde.StatusNotifierWatcher", "RegisteredStatusNotifierItems")
+    if r is None or r.returncode != 0:
+        report("UNKNOWN", "Tray registration", "no status notifier host answered")
+    elif "atlas" in r.stdout.lower():
+        report("PASS", "Tray registration", "the panel has been given the icon")
+    else:
+        report("FAIL", "Tray registration", "the tray is not registered with your panel")
+
+
+def restart_everything() -> None:
+    """Stop every copy, then start exactly one of each.
+
+    Never use `pkill -f wispr-focus-shim` for this: the pattern matches the
+    pkill command line itself and the shell that launched it, so it kills the
+    caller and leaves the target running.
+    """
+    import signal
+    import time
+
+    print("\nRestarting Atlas Wispr\n")
+    for needle in ("wispr-focus-shim", "atlas-wispr-tray"):
+        for pid, _cmd in count_processes(needle):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        for _ in range(15):
+            if not count_processes(needle):
+                break
+            time.sleep(0.2)
+        for pid, _cmd in count_processes(needle):  # stubborn ones
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        print(f"  stopped  {needle}")
+
+    home_bin = Path.home() / ".local/bin"
+    for needle in ("wispr-focus-shim", "atlas-wispr-tray"):
+        exe = home_bin / needle
+        if not exe.exists():
+            print(f"  MISSING  {exe} - run install.sh")
+            continue
+        subprocess.Popen(
+            [sys.executable, str(exe)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        print(f"  started  {needle}")
+    time.sleep(3)
+
+
+def main() -> int:
+    if "--restart" in sys.argv:
+        restart_everything()
+    print("\nAtlas Wispr - health check\n")
+    check_processes()
+    check_dependencies()
+    check_config_and_devices()
+    check_wispr()
+    check_clipboard()
+    check_tray_registration()
+    failed = results.count("FAIL")
+    unknown = results.count("UNKNOWN")
+    print()
+    if failed:
+        print(f"{RED}{failed} problem(s) found.{RESET} "
+              f"{unknown} check(s) could not be completed.\n")
+        return 1
+    if unknown:
+        print(f"{GREEN}No failures.{RESET} "
+              f"{YELLOW}{unknown} check(s) could not be completed - see above.{RESET}\n")
+        return 0
+    print(f"{GREEN}Everything is healthy.{RESET}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -92,6 +92,19 @@ watch the virtual one, not the hardware one.
 and KDE launches System Settings from it by default - every press opens a
 window. F16 is unbound on a stock system.
 
+## When something is wrong
+
+```sh
+atlas-wispr-doctor            # what is wrong?
+atlas-wispr-doctor --restart  # stop every copy, start exactly one, re-check
+```
+
+Checks the things that actually break dictation - duplicate or missing
+processes, dependencies, input-group access, your chosen keyboard and key, the
+Wine database, a real clipboard round-trip, and whether your panel was given the
+tray icon. Every check reports PASS, FAIL or UNKNOWN, and a check that could not
+run says UNKNOWN rather than quietly passing.
+
 ## Extras
 
 - `bin/wispr-hub-visibility show|hide` - the same window transparency toggle the
