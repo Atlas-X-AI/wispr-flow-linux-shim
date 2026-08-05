@@ -3,7 +3,7 @@
 set -euo pipefail
 
 prefix="${WINEPREFIX:-${HOME}/.wine-whisperflow}"
-existing="$(find "$prefix/drive_c/users" -maxdepth 7 -type f -path '*/AppData/Local/WisprFlow/Wispr Flow.exe' -print -quit 2>/dev/null || true)"
+existing="$(find "$prefix/drive_c/users" -maxdepth 7 -type f -size +0c -path '*/AppData/Local/WisprFlow/Wispr Flow.exe' -print -quit 2>/dev/null || true)"
 if [ -n "$existing" ]; then
     printf 'PASS: Wispr Flow is already installed at %s\n' "$existing"
     exit 0
@@ -16,6 +16,10 @@ command -v wine >/dev/null 2>&1 || {
 
 installer_url="${ATLAS_WISPR_INSTALLER_URL:-https://dl.wisprflow.com/wispr-flow/win32/x64/Wispr%20Flow%20Setup-v1.6.7.exe}"
 installer_sha="${ATLAS_WISPR_INSTALLER_SHA256:-7659625e90d65524a9fcb388e39f8343468e1a61fdd50afd4ca35818dca07b8f}"
+mono_version="11.2.0"
+mono_name="wine-mono-${mono_version}-x86.msi"
+mono_url="${ATLAS_WISPR_MONO_URL:-https://dl.winehq.org/wine/wine-mono/${mono_version}/${mono_name}}"
+mono_sha="${ATLAS_WISPR_MONO_SHA256:-b4525679e7da30d4658ceb85739cbc55c771791054abbb4b3152fe96ded0b897}"
 cache="${HOME}/.cache/atlas-wispr"
 installer="${cache}/Wispr Flow Setup-v1.6.7.exe"
 mkdir -p "$cache"
@@ -29,12 +33,36 @@ fi
 printf 'PASS: official Wispr Flow installer checksum verified\n'
 
 mkdir -p "$prefix"
+if [ ! -d "$prefix/drive_c/windows/mono/mono-2.0" ]; then
+    mono_cache="${XDG_CACHE_HOME:-${HOME}/.cache}/wine"
+    mono_installer="${mono_cache}/${mono_name}"
+    mkdir -p "$mono_cache"
+    if ! printf '%s  %s\n' "$mono_sha" "$mono_installer" | sha256sum --check --strict >/dev/null 2>&1; then
+        mono_download="${mono_installer}.download"
+        curl -fL --retry 3 "$mono_url" -o "$mono_download"
+        printf '%s  %s\n' "$mono_sha" "$mono_download" | sha256sum --check --strict
+        mv -f "$mono_download" "$mono_installer"
+    fi
+    printf 'PASS: Wine Mono installer checksum verified\n'
+    WINEPREFIX="$prefix" \
+        WINEDEBUG="${WINEDEBUG:--all}" \
+        WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree,mshtml=}" \
+        wine msiexec /i "$mono_installer" /qn
+    [ -d "$prefix/drive_c/windows/mono/mono-2.0" ] || {
+        printf 'FAIL: Wine Mono installation completed without creating its runtime.\n' >&2
+        exit 1
+    }
+    printf 'PASS: Wine Mono installed without a prompt\n'
+else
+    printf 'PASS: existing Wine Mono runtime retained\n'
+fi
+
 installer_rc=0
 WINEPREFIX="$prefix" WINEDEBUG="${WINEDEBUG:--all}" wine "$installer" --silent || installer_rc=$?
 
 deadline=$((SECONDS + 120))
 while [ "$SECONDS" -lt "$deadline" ]; do
-    existing="$(find "$prefix/drive_c/users" -maxdepth 7 -type f -path '*/AppData/Local/WisprFlow/Wispr Flow.exe' -print -quit 2>/dev/null || true)"
+    existing="$(find "$prefix/drive_c/users" -maxdepth 7 -type f -size +0c -path '*/AppData/Local/WisprFlow/Wispr Flow.exe' -print -quit 2>/dev/null || true)"
     if [ -n "$existing" ]; then
         printf 'PASS: Wispr Flow installed at %s\n' "$existing"
         exit 0

@@ -164,7 +164,10 @@ def check_wispr() -> None:
             "SELECT rowid, status FROM History ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
         con.close()
-        report("PASS", "Transcript database", f"readable, newest row {row[0]}")
+        if row is None:
+            report("UNKNOWN", "Transcript database", "readable, no dictations yet")
+        else:
+            report("PASS", "Transcript database", f"readable, newest row {row[0]}")
     except Exception as exc:
         report("FAIL", "Transcript database", str(exc)[:60])
 

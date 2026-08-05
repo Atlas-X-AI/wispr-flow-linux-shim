@@ -50,16 +50,15 @@ supported.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Atlas-X-AI/wispr-flow-linux-shim/v1.1.3/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Atlas-X-AI/wispr-flow-linux-shim/v1.1.4/bootstrap.sh | bash
 ```
 
-The release is pinned, its archive checksum is verified before anything runs,
-and the installer provisions the complete supported stack: Arch packages,
-an isolated checksum-pinned Wine build, `ydotool`, Wayland and X11
-clipboard/window tools, a checksum-pinned `kdotool`, the official Wispr Flow Windows
-installer, Atlas Wispr, its tray, and its enabled user services. `sudo` may ask
-The installer does **not** run `pacman` or upgrade the host. It retains an
-existing Wine runtime or installs a pinned portable Wine build under
+The release is pinned and its archive checksum is verified before anything
+runs. The installer checks the required Hermes desktop tools, then installs an
+isolated checksum-pinned Wine build, a checksum-pinned `kdotool`, verified Wine
+Mono, the official Wispr Flow Windows installer, Atlas Wispr, its tray, and its
+enabled user services. The installer does **not** run `pacman`, request `sudo`,
+or upgrade the host. It retains an existing Wine runtime or installs one under
 `~/.local/opt/atlas-wispr`. A Linux base missing the remaining Hermes desktop
 tools fails loudly without changing packages; that blank-Arch path remains
 **UNKNOWN**, not advertised as working.

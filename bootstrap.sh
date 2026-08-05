@@ -2,7 +2,7 @@
 # Pinned GitHub-release bootstrap for Atlas Wispr.
 set -euo pipefail
 
-version="${ATLAS_WISPR_VERSION:-v1.1.3}"
+version="${ATLAS_WISPR_VERSION:-v1.1.4}"
 plain_version="${version#v}"
 release_base="${ATLAS_WISPR_RELEASE_BASE:-https://github.com/Atlas-X-AI/wispr-flow-linux-shim/releases/download/${version}}"
 archive="atlas-wispr-${plain_version}.tar.gz"

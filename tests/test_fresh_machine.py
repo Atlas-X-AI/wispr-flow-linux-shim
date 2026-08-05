@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 import runpy
+import re
 import shutil
 import signal
 import sqlite3
@@ -162,16 +163,28 @@ class WisprInstallerTests(unittest.TestCase):
             log = tmp / "wine.log"
             home.mkdir()
             fake_bin.mkdir()
+            placeholder = (
+                home
+                / ".wine-whisperflow/drive_c/users/test/AppData/Local/WisprFlow/Wispr Flow.exe"
+            )
+            placeholder.parent.mkdir(parents=True)
+            placeholder.touch()
             installer = tmp / "Wispr Flow Setup.exe"
             installer.write_bytes(b"known vendor installer")
             digest = hashlib.sha256(installer.read_bytes()).hexdigest()
+            mono = tmp / "wine-mono.msi"
+            mono.write_bytes(b"known wine mono installer")
+            mono_digest = hashlib.sha256(mono.read_bytes()).hexdigest()
             executable(
                 fake_bin / "wine",
                 "#!/bin/sh\n"
-                f"printf '%s|%s\\n' \"$WINEPREFIX\" \"$*\" > '{log}'\n"
+                f"printf '%s|%s|%s\\n' \"$WINEDLLOVERRIDES\" \"$WINEPREFIX\" \"$*\" >> '{log}'\n"
+                "case \"$*\" in\n"
+                "  *\"msiexec /i\"*) mkdir -p \"$WINEPREFIX/drive_c/windows/mono/mono-2.0\"; exit 0;;\n"
+                "esac\n"
                 "dest=\"$WINEPREFIX/drive_c/users/test/AppData/Local/WisprFlow\"\n"
                 "mkdir -p \"$dest\"\n"
-                "touch \"$dest/Wispr Flow.exe\"\n",
+                "printf 'installed' > \"$dest/Wispr Flow.exe\"\n",
             )
             env = dict(
                 os.environ,
@@ -179,6 +192,8 @@ class WisprInstallerTests(unittest.TestCase):
                 PATH=f"{fake_bin}:/usr/bin",
                 ATLAS_WISPR_INSTALLER_URL=installer.as_uri(),
                 ATLAS_WISPR_INSTALLER_SHA256=digest,
+                ATLAS_WISPR_MONO_URL=mono.as_uri(),
+                ATLAS_WISPR_MONO_SHA256=mono_digest,
             )
             result = subprocess.run(
                 [str(ROOT / "scripts/install-wispr-flow")],
@@ -187,10 +202,42 @@ class WisprInstallerTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-            call = log.read_text()
-            self.assertIn(str(home / ".wine-whisperflow"), call)
-            self.assertIn("--silent", call)
+            calls = log.read_text().splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertIn("mscoree,mshtml=", calls[0])
+            self.assertIn("msiexec /i", calls[0])
+            self.assertIn(str(home / ".wine-whisperflow"), calls[0])
+            self.assertIn("--silent", calls[1])
+            self.assertIn("PASS: Wine Mono installed without a prompt", result.stdout)
             self.assertIn("PASS: Wispr Flow installed", result.stdout)
+
+
+class DoctorTests(unittest.TestCase):
+    def test_empty_new_transcript_database_is_unknown_not_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            db = (
+                tmp
+                / ".wine-whisperflow/drive_c/users/test/AppData/Roaming/Wispr Flow/flow.sqlite"
+            )
+            db.parent.mkdir(parents=True)
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE History (status TEXT)")
+            con.commit()
+            con.close()
+            env = dict(os.environ, HOME=str(tmp), PATH="/usr/bin")
+            result = subprocess.run(
+                [str(ROOT / "bin/atlas-wispr-doctor")],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+            transcript_line = next(
+                line for line in plain.splitlines() if "Transcript database" in line
+            )
+            self.assertIn("UNKNOWN", transcript_line)
+            self.assertIn("readable, no dictations yet", transcript_line)
 
 
 class ToggleCommandTests(unittest.TestCase):
