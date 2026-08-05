@@ -1,0 +1,745 @@
+#!/usr/bin/env python3
+"""Atlas Wispr Tray - system tray control panel for wispr-flow-linux-shim.
+
+Gives the shim a face: status at a glance, key rebinding by pressing the key,
+window transparency toggle, and a first-run setup wizard. Uses AyatanaAppIndicator3
+(StatusNotifierItem), which is the tray protocol that actually works on Wayland.
+
+Everything it changes is written to ~/.config/wispr-shim/config.json and applied
+by restarting the shim service, so the tray never has to talk to the daemon.
+"""
+import json
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("AyatanaAppIndicator3", "0.1")
+from gi.repository import AyatanaAppIndicator3 as AppIndicator  # noqa: E402
+from gi.repository import GdkPixbuf, GLib, Gtk  # noqa: E402
+
+APP_ID = "atlas-wispr-tray"
+CONFIG_PATH = Path(
+    os.environ.get(
+        "WISPR_SHIM_CONFIG", str(Path.home() / ".config/wispr-shim/config.json")
+    )
+)
+SERVICE = "wispr-focus-shim.service"
+ICON_DIR = Path(__file__).resolve().parent.parent / "icons"
+USER_ICON_DIR = Path.home() / ".local/share/icons/hicolor/256x256/apps"
+COPPER = "#C9924A"
+
+DEFAULTS = {
+    "devices": ["keyd virtual keyboard", "input-remapper keyboard"],
+    "one_button_codes": [183, 186],
+    "paste_deny_classes": ["systemsettings"],
+    "window_class": "wispr flow.exe",
+    "auto_paste": True,
+    "press_enter_after_paste": True,
+    "notifications": True,
+    "enabled": True,
+}
+
+# Keys that look free but are not. F13 is XF86Tools and KDE launches System
+# Settings from it by default - binding it there opens a window on every press.
+RISKY_CODES = {
+    183: "F13 is XF86Tools - KDE opens System Settings on every press",
+    184: "F14 is often Scroll Lock or a screen-saver key",
+    185: "F15 is often mapped to Pause on some layouts",
+}
+
+
+def load_config() -> dict:
+    cfg = dict(DEFAULTS)
+    try:
+        cfg.update(json.loads(CONFIG_PATH.read_text()))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+
+
+def icon_name(state: str) -> str:
+    """Themed icon name for the tray. Panels resolve names reliably; an
+    absolute path renders as a blank square on several of them."""
+    name = f"atlas-wispr-{state}"
+    if (USER_ICON_DIR / f"{name}.png").exists() or (ICON_DIR / f"{name}.png").exists():
+        return name
+    return "audio-input-microphone"
+
+
+def icon_path(state: str) -> str:
+    """Absolute path, for windows and dialogs (not the tray)."""
+    for base in (USER_ICON_DIR, ICON_DIR):
+        candidate = base / f"atlas-wispr-{state}.png"
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
+def sh(*args: str, timeout: int = 15) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+SHIM_BIN = str(Path(__file__).resolve().parent / "wispr-focus-shim")
+
+
+def service_installed() -> bool:
+    r = sh("systemctl", "--user", "list-unit-files", SERVICE)
+    return SERVICE in r.stdout
+
+
+def service_active() -> bool:
+    return sh("systemctl", "--user", "is-active", SERVICE).stdout.strip() == "active"
+
+
+def process_running() -> bool:
+    """A shim started by hand counts as running - reporting it as stopped
+    would be a lie the user can see."""
+    return sh("pgrep", "-f", "wispr-focus-shim").returncode == 0
+
+
+def shim_running() -> bool:
+    return service_active() or process_running()
+
+
+def start_shim() -> tuple[bool, str]:
+    if service_installed():
+        r = sh("systemctl", "--user", "start", SERVICE, timeout=25)
+        return r.returncode == 0, (r.stderr or "started").strip()[:200]
+    try:
+        subprocess.Popen(
+            [sys.executable, SHIM_BIN],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True, "started"
+    except Exception as exc:
+        return False, str(exc)[:200]
+
+
+def stop_shim() -> tuple[bool, str]:
+    if service_active():
+        r = sh("systemctl", "--user", "stop", SERVICE, timeout=25)
+        return r.returncode == 0, (r.stderr or "stopped").strip()[:200]
+    sh("pkill", "-f", "wispr-focus-shim")
+    return True, "stopped"
+
+
+def restart_service() -> tuple[bool, str]:
+    """Apply new settings: the shim reads its config at startup."""
+    if service_installed() and service_active():
+        r = sh("systemctl", "--user", "restart", SERVICE, timeout=25)
+        return r.returncode == 0, (r.stderr or "restarted").strip()[:200]
+    if process_running():
+        stop_shim()
+        import time as _t
+
+        _t.sleep(0.8)
+    return start_shim()
+
+
+def missing_dependencies() -> list[str]:
+    missing = []
+    for cmd in ("ydotool", "wl-copy", "wl-paste", "kdotool", "notify-send"):
+        if sh("which", cmd).returncode != 0:
+            missing.append(cmd)
+    try:
+        import evdev  # noqa: F401
+    except ImportError:
+        missing.append("python-evdev")
+    if sh("pgrep", "-x", "ydotoold").returncode != 0:
+        missing.append("ydotoold (not running)")
+    groups = sh("id", "-nG").stdout.split()
+    if "input" not in groups:
+        missing.append("your user is not in the 'input' group")
+    return missing
+
+
+def keyboard_devices() -> list[str]:
+    """Input nodes that carry key events, best candidates first."""
+    try:
+        import evdev
+    except ImportError:
+        return []
+    virtual, physical = [], []
+    for path in evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(path)
+        except OSError:
+            continue
+        caps = dev.capabilities().get(evdev.ecodes.EV_KEY, [])
+        if len(caps) > 40:  # a real keyboard, not a power button
+            name = dev.name
+            # a remapper's virtual node is usually the only one carrying real
+            # keystrokes, because remappers grab the hardware exclusively
+            if any(k in name.lower() for k in ("keyd", "remapper", "virtual")):
+                virtual.append(name)
+            else:
+                physical.append(name)
+        dev.close()
+    return sorted(set(virtual)) + sorted(set(physical))
+
+
+def transparency_state() -> bool:
+    r = sh(
+        "kreadconfig6", "--file", "kwinrulesrc",
+        "--group", "wispr-hub-invisible", "--key", "opacityactive",
+    )
+    return r.stdout.strip() == "0"
+
+
+def set_transparency(hidden: bool) -> None:
+    """Write the KWin rule that makes the Wispr window invisible."""
+    opacity = "0" if hidden else "100"
+    existing = sh(
+        "kreadconfig6", "--file", "kwinrulesrc", "--group", "General", "--key", "rules"
+    ).stdout.strip()
+    if "wispr-hub-invisible" not in existing:
+        rules = ",".join(filter(None, [existing, "wispr-hub-invisible"]))
+        count = str(len([r for r in rules.split(",") if r]))
+        for key, val in (("rules", rules), ("count", count)):
+            sh("kwriteconfig6", "--file", "kwinrulesrc", "--group", "General",
+               "--key", key, val)
+        for key, val in (
+            ("Description", "Wispr Flow Hub invisible (Atlas Wispr Tray)"),
+            ("wmclass", "wispr flow.exe"), ("wmclassmatch", "2"),
+            ("title", "Hub"), ("titlematch", "1"),
+            ("opacityactiverule", "2"), ("opacityinactiverule", "2"),
+        ):
+            sh("kwriteconfig6", "--file", "kwinrulesrc",
+               "--group", "wispr-hub-invisible", "--key", key, val)
+    for key in ("opacityactive", "opacityinactive"):
+        sh("kwriteconfig6", "--file", "kwinrulesrc",
+           "--group", "wispr-hub-invisible", "--key", key, opacity)
+    sh("qdbus6", "org.kde.KWin", "/KWin", "reconfigure")
+
+
+def key_name(code: int) -> str:
+    """Human name for an evdev key code, e.g. 186 -> F16."""
+    try:
+        import evdev
+
+        name = evdev.ecodes.bytype[evdev.ecodes.EV_KEY].get(code, code)
+        if isinstance(name, (list, tuple)):
+            name = name[0]
+        return str(name).replace("KEY_", "").replace("BTN_", "Button ")
+    except Exception:
+        return f"code {code}"
+
+
+def dialog(parent, kind, title, text, secondary=""):
+    types = {
+        "info": (Gtk.MessageType.INFO, Gtk.ButtonsType.OK),
+        "warn": (Gtk.MessageType.WARNING, Gtk.ButtonsType.OK),
+        "error": (Gtk.MessageType.ERROR, Gtk.ButtonsType.OK),
+        "ask": (Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO),
+    }
+    mt, bt = types[kind]
+    d = Gtk.MessageDialog(
+        transient_for=parent, modal=True, message_type=mt, buttons=bt, text=title
+    )
+    if secondary or text:
+        d.format_secondary_text(secondary or text)
+    resp = d.run()
+    d.destroy()
+    return resp
+
+
+class KeyCaptureDialog(Gtk.Dialog):
+    """Press the key you want; we read it straight from evdev.
+
+    Reading evdev rather than GTK matters: the point is to capture keys the
+    desktop may swallow (F13 opens System Settings) or that no GTK window
+    will ever see, and to learn the raw code the shim needs.
+    """
+
+    def __init__(self, parent, devices: list[str]):
+        super().__init__(title="Press your key", transient_for=parent, modal=True)
+        self.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        self.captured: int | None = None
+        self._stop = threading.Event()
+        self._devices = devices
+        box = self.get_content_area()
+        box.set_spacing(12)
+        box.set_border_width(18)
+        lbl = Gtk.Label()
+        lbl.set_markup(
+            "<b>Press the key or mouse button you want to use.</b>\n\n"
+            "If it is a mouse side button, it must already send a key\n"
+            "(configure it in your mouse software or input-remapper first)."
+        )
+        lbl.set_justify(Gtk.Justification.CENTER)
+        box.add(lbl)
+        self.status = Gtk.Label(label="Listening...")
+        box.add(self.status)
+        self.show_all()
+        threading.Thread(target=self._listen, daemon=True).start()
+        self.connect("response", lambda *_: self._stop.set())
+
+    def _listen(self) -> None:
+        try:
+            import evdev
+            from select import select
+        except ImportError:
+            GLib.idle_add(self.status.set_text, "python-evdev is not installed")
+            return
+        devs = []
+        for path in evdev.list_devices():
+            try:
+                d = evdev.InputDevice(path)
+            except OSError:
+                continue
+            if evdev.ecodes.EV_KEY in d.capabilities() and (
+                not self._devices or d.name in self._devices
+            ):
+                devs.append(d)
+            else:
+                d.close()
+        if not devs:
+            GLib.idle_add(self.status.set_text, "no readable input devices")
+            return
+        by_fd = {d.fd: d for d in devs}
+        while not self._stop.is_set():
+            r, _, _ = select(by_fd, [], [], 0.4)
+            for fd in r:
+                try:
+                    for ev in by_fd[fd].read():
+                        if ev.type == evdev.ecodes.EV_KEY and ev.value == 1:
+                            # ignore plain modifiers - they are not a binding
+                            if ev.code in (29, 97, 125, 126, 42, 54, 56, 100):
+                                continue
+                            self.captured = ev.code
+                            GLib.idle_add(self.response, Gtk.ResponseType.OK)
+                            return
+                except OSError:
+                    continue
+
+
+class SettingsWindow(Gtk.Window):
+    def __init__(self, tray: "AtlasWisprTray"):
+        super().__init__(title="Atlas Wispr - Settings")
+        self.tray = tray
+        self.cfg = load_config()
+        self.set_default_size(560, 0)
+        self.set_border_width(0)
+        if icon_path("idle"):
+            self.set_icon_from_file(icon_path("idle"))
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(outer)
+        outer.add(self._header())
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        body.set_border_width(18)
+        outer.add(body)
+
+        body.add(self._section("Dictation key"))
+        self.key_label = Gtk.Label(xalign=0)
+        self._refresh_key_label()
+        row = Gtk.Box(spacing=10)
+        row.pack_start(self.key_label, True, True, 0)
+        change = Gtk.Button(label="Change...")
+        change.connect("clicked", self.on_change_key)
+        row.pack_start(change, False, False, 0)
+        body.add(row)
+        body.add(self._hint(
+            "One press starts recording, the next stops it and pastes the text."
+        ))
+
+        body.add(self._section("Keyboard source"))
+        self.device_combo = Gtk.ComboBoxText()
+        found = keyboard_devices()
+        current = self.cfg["devices"]
+        for name in found:
+            self.device_combo.append_text(name)
+        for i, name in enumerate(found):
+            if name in current:
+                self.device_combo.set_active(i)
+                break
+        else:
+            if found:
+                self.device_combo.set_active(0)
+        body.add(self.device_combo)
+        body.add(self._hint(
+            "If a key remapper is running it takes over your keyboard, and its\n"
+            "virtual device is the only one that sees your key presses."
+        ))
+
+        body.add(self._section("Behaviour"))
+        self.sw_paste = self._switch(
+            body, "Paste the text automatically", self.cfg["auto_paste"]
+        )
+        self.sw_enter = self._switch(
+            body, "Press Enter after pasting (sends chat messages)",
+            self.cfg["press_enter_after_paste"],
+        )
+        self.sw_notify = self._switch(
+            body, "Show a notification with the text", self.cfg["notifications"]
+        )
+        self.sw_hidden = self._switch(
+            body, "Keep the Wispr Flow window invisible", transparency_state()
+        )
+
+        btns = Gtk.Box(spacing=10)
+        btns.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.destroy())
+        save = Gtk.Button(label="Save and apply")
+        save.get_style_context().add_class("suggested-action")
+        save.connect("clicked", self.on_save)
+        btns.add(cancel)
+        btns.add(save)
+        body.add(btns)
+        self.show_all()
+
+    def _header(self) -> Gtk.Widget:
+        bar = Gtk.Box(spacing=12)
+        bar.set_border_width(16)
+        icon = icon_path("idle")
+        if icon:
+            img = Gtk.Image.new_from_pixbuf(
+                GdkPixbuf.Pixbuf.new_from_file_at_size(icon, 40, 40)
+            )
+            bar.pack_start(img, False, False, 0)
+        lbl = Gtk.Label(xalign=0)
+        lbl.set_markup(
+            '<span size="large" weight="bold">Atlas Wispr</span>\n'
+            '<span size="small">Dictation for Wispr Flow on Linux</span>'
+        )
+        bar.pack_start(lbl, True, True, 0)
+        return bar
+
+    @staticmethod
+    def _section(text: str) -> Gtk.Widget:
+        lbl = Gtk.Label(xalign=0)
+        lbl.set_markup(f'<b>{text}</b>')
+        lbl.set_margin_top(6)
+        return lbl
+
+    @staticmethod
+    def _hint(text: str) -> Gtk.Widget:
+        lbl = Gtk.Label(xalign=0)
+        lbl.set_markup(f'<span size="small" alpha="70%">{text}</span>')
+        return lbl
+
+    @staticmethod
+    def _switch(parent, label: str, active: bool) -> Gtk.Switch:
+        row = Gtk.Box(spacing=10)
+        lbl = Gtk.Label(label=label, xalign=0)
+        sw = Gtk.Switch()
+        sw.set_active(bool(active))
+        sw.set_halign(Gtk.Align.END)
+        row.pack_start(lbl, True, True, 0)
+        row.pack_start(sw, False, False, 0)
+        parent.add(row)
+        return sw
+
+    def _refresh_key_label(self) -> None:
+        codes = self.cfg["one_button_codes"]
+        names = ", ".join(key_name(c) for c in codes) or "none set"
+        self.key_label.set_markup(f"Currently: <b>{names}</b>")
+
+    def on_change_key(self, _btn) -> None:
+        dlg = KeyCaptureDialog(self, self.cfg["devices"])
+        resp = dlg.run()
+        code = dlg.captured
+        dlg.destroy()
+        if resp != Gtk.ResponseType.OK or code is None:
+            return
+        if code in RISKY_CODES:
+            if dialog(
+                self, "ask", "That key is already used by your desktop",
+                "", f"{RISKY_CODES[code]}.\n\nUse it anyway?",
+            ) != Gtk.ResponseType.YES:
+                return
+        self.cfg["one_button_codes"] = [code]
+        self._refresh_key_label()
+
+    def on_save(self, _btn) -> None:
+        dev = self.device_combo.get_active_text()
+        if dev:
+            self.cfg["devices"] = [dev]
+        self.cfg["auto_paste"] = self.sw_paste.get_active()
+        self.cfg["press_enter_after_paste"] = self.sw_enter.get_active()
+        self.cfg["notifications"] = self.sw_notify.get_active()
+        save_config(self.cfg)
+        set_transparency(self.sw_hidden.get_active())
+        ok, detail = restart_service()
+        self.tray.refresh()
+        if not ok:
+            dialog(self, "error", "Settings saved, but the shim did not restart",
+                   "", f"{detail}\n\nStart it from the tray menu.")
+        self.destroy()
+
+
+class OnboardingWindow(Gtk.Assistant):
+    """First-run setup: check dependencies, pick the device, bind the key, test."""
+
+    def __init__(self, tray: "AtlasWisprTray"):
+        super().__init__(title="Atlas Wispr - Setup")
+        self.tray = tray
+        self.cfg = load_config()
+        self.set_default_size(600, 420)
+        self._page_welcome()
+        self._page_deps()
+        self._page_device()
+        self._page_key()
+        self._page_done()
+        self.connect("cancel", lambda *_: self.destroy())
+        self.connect("close", self._finish)
+        self.connect("prepare", self._prepare)
+        self.show_all()
+
+    def _add(self, widget, title, ptype=Gtk.AssistantPageType.CONTENT, complete=True):
+        widget.set_border_width(20)
+        self.append_page(widget)
+        self.set_page_title(widget, title)
+        self.set_page_type(widget, ptype)
+        self.set_page_complete(widget, complete)
+        return widget
+
+    def _page_welcome(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        icon = icon_path("idle")
+        if icon:
+            box.add(Gtk.Image.new_from_pixbuf(
+                GdkPixbuf.Pixbuf.new_from_file_at_size(icon, 72, 72)
+            ))
+        lbl = Gtk.Label()
+        lbl.set_markup(
+            '<span size="x-large" weight="bold">Atlas Wispr</span>\n\n'
+            "Wispr Flow has no Linux build. Running it under Wine leaves the\n"
+            "hotkey dead outside its own window, the clipboard unreliable, and\n"
+            "dictated text stranded where you cannot paste it.\n\n"
+            "This sets that right. Three short steps."
+        )
+        lbl.set_justify(Gtk.Justification.CENTER)
+        box.add(lbl)
+        self._add(box, "Welcome", Gtk.AssistantPageType.INTRO)
+
+    def _page_deps(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.deps_label = Gtk.Label(xalign=0)
+        box.add(self.deps_label)
+        recheck = Gtk.Button(label="Check again")
+        recheck.set_halign(Gtk.Align.START)
+        recheck.connect("clicked", lambda *_: self._check_deps())
+        box.add(recheck)
+        self.deps_page = self._add(box, "Requirements", complete=False)
+
+    def _check_deps(self):
+        missing = missing_dependencies()
+        if missing:
+            items = "\n".join(f"  -  {m}" for m in missing)
+            self.deps_label.set_markup(
+                "<b>Some things are missing:</b>\n\n"
+                f"{GLib.markup_escape_text(items)}\n\n"
+                '<span size="small">Install them, then press Check again.\n'
+                "On Arch: sudo pacman -S ydotool wl-clipboard kdotool "
+                "libnotify python-evdev\n"
+                "Then: sudo usermod -aG input $USER  (log out and back in)</span>"
+            )
+        else:
+            self.deps_label.set_markup(
+                "<b>Everything needed is installed.</b>\n\n"
+                "Keyboard access, key injection, clipboard and notifications\n"
+                "are all available."
+            )
+        self.set_page_complete(self.deps_page, not missing)
+
+    def _page_device(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.add(Gtk.Label(
+            label="Which keyboard should Atlas Wispr listen to?", xalign=0
+        ))
+        self.dev_combo = Gtk.ComboBoxText()
+        box.add(self.dev_combo)
+        box.add(SettingsWindow._hint(
+            "Pick the top entry unless you know otherwise. If a key remapper is\n"
+            "running, it holds your real keyboard and only its virtual device\n"
+            "sees your presses."
+        ))
+        self.device_page = self._add(box, "Keyboard")
+
+    def _page_key(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.add(Gtk.Label(
+            label="Choose the key that starts and stops dictation.", xalign=0
+        ))
+        self.key_lbl = Gtk.Label(xalign=0)
+        box.add(self.key_lbl)
+        btn = Gtk.Button(label="Press a key...")
+        btn.set_halign(Gtk.Align.START)
+        btn.connect("clicked", self._capture)
+        box.add(btn)
+        box.add(SettingsWindow._hint(
+            "A spare key or a mouse side button works best. Avoid F13: most\n"
+            "desktops open System Settings from it."
+        ))
+        self.key_page = self._add(box, "Dictation key")
+
+    def _page_done(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.done_lbl = Gtk.Label()
+        self.done_lbl.set_markup(
+            "<b>Ready.</b>\n\n"
+            "Press your key, say something, press it again.\n"
+            "The text is copied, and pasted where your cursor is.\n\n"
+            "Atlas Wispr lives in your system tray - change anything from there."
+        )
+        box.add(self.done_lbl)
+        self._add(box, "Done", Gtk.AssistantPageType.CONFIRM)
+
+    def _capture(self, _btn):
+        dlg = KeyCaptureDialog(self, self.cfg.get("devices", []))
+        resp = dlg.run()
+        code = dlg.captured
+        dlg.destroy()
+        if resp == Gtk.ResponseType.OK and code is not None:
+            if code in RISKY_CODES and dialog(
+                self, "ask", "That key is used by your desktop", "",
+                f"{RISKY_CODES[code]}.\n\nUse it anyway?",
+            ) != Gtk.ResponseType.YES:
+                return
+            self.cfg["one_button_codes"] = [code]
+            name = key_name(code)
+            self.key_lbl.set_markup(f"Chosen: <b>{name}</b>")
+
+    def _prepare(self, _assistant, page):
+        if page is self.deps_page:
+            self._check_deps()
+        elif page is self.device_page and not self.dev_combo.get_model().iter_n_children(None):
+            for name in keyboard_devices():
+                self.dev_combo.append_text(name)
+            self.dev_combo.set_active(0)
+
+    def _finish(self, *_):
+        dev = self.dev_combo.get_active_text()
+        if dev:
+            self.cfg["devices"] = [dev]
+        save_config(self.cfg)
+        if service_installed():
+            sh("systemctl", "--user", "enable", SERVICE)
+        restart_service()
+        self.tray.refresh()
+        self.destroy()
+
+
+class AtlasWisprTray:
+    def __init__(self) -> None:
+        self.indicator = AppIndicator.Indicator.new(
+            APP_ID, icon_name("idle"), AppIndicator.IndicatorCategory.APPLICATION_STATUS
+        )
+        # so the icon resolves when running from a checkout, before install
+        self.indicator.set_icon_theme_path(str(ICON_DIR))
+        self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        self.indicator.set_title("Atlas Wispr")
+        self.menu = Gtk.Menu()
+        self.indicator.set_menu(self.menu)
+        self.settings_window = None
+        self.build_menu()
+        GLib.timeout_add_seconds(5, self._tick)
+
+    def build_menu(self) -> None:
+        for child in self.menu.get_children():
+            self.menu.remove(child)
+        active = shim_running()
+
+        status = Gtk.MenuItem(
+            label=("Dictation ready" if active else "Dictation stopped")
+        )
+        status.set_sensitive(False)
+        self.menu.append(status)
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        toggle = Gtk.MenuItem(label="Stop dictation" if active else "Start dictation")
+        toggle.connect("activate", self.on_toggle_service)
+        self.menu.append(toggle)
+
+        vis = Gtk.CheckMenuItem(label="Hide the Wispr window")
+        vis.set_active(transparency_state())
+        vis.connect("toggled", self.on_toggle_visibility)
+        self.menu.append(vis)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+        for label, cb in (
+            ("Settings...", self.on_settings),
+            ("Run setup again...", self.on_onboarding),
+        ):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", cb)
+            self.menu.append(item)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+        about = Gtk.MenuItem(label="About Atlas Wispr")
+        about.connect("activate", self.on_about)
+        self.menu.append(about)
+        quit_item = Gtk.MenuItem(label="Quit tray")
+        quit_item.connect("activate", lambda *_: Gtk.main_quit())
+        self.menu.append(quit_item)
+        self.menu.show_all()
+
+    def refresh(self) -> None:
+        GLib.idle_add(self.build_menu)
+        GLib.idle_add(self._tick)
+
+    def _tick(self) -> bool:
+        self.indicator.set_icon_full(
+            icon_name("idle" if shim_running() else "off"), "Atlas Wispr"
+        )
+        return True
+
+    def on_toggle_service(self, _item) -> None:
+        stop_shim() if shim_running() else start_shim()
+        self.refresh()
+
+    def on_toggle_visibility(self, item) -> None:
+        set_transparency(item.get_active())
+
+    def on_settings(self, _item) -> None:
+        if self.settings_window and self.settings_window.get_realized():
+            self.settings_window.present()
+            return
+        self.settings_window = SettingsWindow(self)
+
+    def on_onboarding(self, _item) -> None:
+        OnboardingWindow(self)
+
+    def on_about(self, _item) -> None:
+        d = Gtk.AboutDialog()
+        d.set_program_name("Atlas Wispr")
+        d.set_comments(
+            "Dictation for Wispr Flow on Linux.\n"
+            "Global hotkey, reliable clipboard, one-button dictation."
+        )
+        d.set_website("https://github.com/Atlas-X-AI/wispr-flow-linux-shim")
+        d.set_website_label("Source and documentation")
+        d.set_copyright("Atlas X AI Pty Ltd, trading as Atlas AI")
+        d.set_license_type(Gtk.License.MIT_X11)
+        icon = icon_path("idle")
+        if icon:
+            d.set_logo(GdkPixbuf.Pixbuf.new_from_file_at_size(icon, 96, 96))
+        d.run()
+        d.destroy()
+
+
+if __name__ == "__main__":
+    tray = None
+    try:
+        tray = AtlasWisprTray()
+        if not CONFIG_PATH.exists():
+            GLib.idle_add(lambda: (OnboardingWindow(tray), False)[1])
+        Gtk.main()
+    except KeyboardInterrupt:
+        sys.exit(0)

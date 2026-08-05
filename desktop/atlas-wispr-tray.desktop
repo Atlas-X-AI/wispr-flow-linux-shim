@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Atlas Wispr
+GenericName=Dictation control
+Comment=Dictation for Wispr Flow on Linux - hotkey, clipboard, auto-paste
+Exec=atlas-wispr-tray
+Icon=atlas-wispr-idle
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;voice;speech;wispr;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

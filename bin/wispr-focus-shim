@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import json
 import sqlite3
 from pathlib import Path
 
@@ -61,34 +62,63 @@ def _find_flow_db() -> str:
     )
 
 
+CONFIG_PATH = Path(
+    os.environ.get(
+        "WISPR_SHIM_CONFIG",
+        str(Path.home() / ".config/wispr-shim/config.json"),
+    )
+)
+DEFAULTS = {
+    "devices": ["keyd virtual keyboard", "input-remapper keyboard"],
+    "one_button_codes": [183, 186],
+    "paste_deny_classes": ["systemsettings"],
+    "window_class": "wispr flow.exe",
+    "auto_paste": True,
+    "press_enter_after_paste": True,
+    "notifications": True,
+    "enabled": True,
+}
+
+
+def load_config() -> dict:
+    """File first, environment second - env always wins so debugging works."""
+    cfg = dict(DEFAULTS)
+    try:
+        cfg.update(json.loads(CONFIG_PATH.read_text()))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # a corrupt config must never brick the daemon
+        print(f"config unreadable ({exc}); using defaults", flush=True)
+    ov = os.environ.get("WISPR_SHIM_DEVICES")
+    if ov:
+        cfg["devices"] = [d for d in ov.split(",") if d]
+    ov = os.environ.get("WISPR_ONE_BUTTON_CODES")
+    if ov:
+        cfg["one_button_codes"] = [int(c) for c in ov.split(",") if c.strip()]
+    ov = os.environ.get("WISPR_PASTE_DENY")
+    if ov:
+        cfg["paste_deny_classes"] = [c for c in ov.split(",") if c]
+    ov = os.environ.get("WISPR_WINDOW_CLASS")
+    if ov:
+        cfg["window_class"] = ov
+    return cfg
+
+
+CONFIG = load_config()
 YDOTOOL_SOCKET = _ydotool_socket()
 # Input nodes to watch. Physical keyboards are often exclusively grabbed by a
 # remapper (keyd, input-remapper), so the remapper's virtual node is the only
 # one carrying real keystrokes. Override with WISPR_SHIM_DEVICES="a,b".
-WATCH_NAMES = set(
-    filter(
-        None,
-        os.environ.get(
-            "WISPR_SHIM_DEVICES",
-            "keyd virtual keyboard,input-remapper keyboard",
-        ).split(","),
-    )
-)
-WISPR_CLASS = os.environ.get("WISPR_WINDOW_CLASS", "wispr flow.exe")
+WATCH_NAMES = set(CONFIG["devices"])
+WISPR_CLASS = CONFIG["window_class"]
 # never auto-paste into these (settings pages treat Enter as "apply")
-PASTE_DENY_CLASSES = {WISPR_CLASS} | set(
-    filter(None, os.environ.get("WISPR_PASTE_DENY", "systemsettings").split(","))
-)
+PASTE_DENY_CLASSES = {WISPR_CLASS} | set(CONFIG["paste_deny_classes"])
 FLOW_DB = _find_flow_db()
 CTRL_KEYS = {29, 97}    # KEY_LEFTCTRL, KEY_RIGHTCTRL
 META_KEYS = {125, 126}  # KEY_LEFTMETA, KEY_RIGHTMETA
 # Extra key that drives the one-button flow (default F13 + F16). Note F13 is
 # XF86Tools on many desktops and KDE launches System Settings from it.
-ONE_BUTTON_CODES = {
-    int(c)
-    for c in os.environ.get("WISPR_ONE_BUTTON_CODES", "183,186").split(",")
-    if c.strip()
-}
+ONE_BUTTON_CODES = set(CONFIG["one_button_codes"])
 DEBOUNCE_S = 0.8
 CLIP_MATCH_TIMEOUT_S = 8.0
 LOG = os.environ.get(
@@ -309,7 +339,8 @@ def transcript_poller() -> None:
             log(f"row {rowid}: clipboard read-back mismatch")
             notify(text)
             continue
-        threading.Thread(target=notify, args=(text,), daemon=True).start()
+        if CONFIG.get("notifications", True):
+            threading.Thread(target=notify, args=(text,), daemon=True).start()
         log(f"row {rowid}: copied to clipboard ({len(text)} chars), notify dispatched")
         # button-12 one-button flow: paste + Enter for the transcript that
         # follows its stop press (other stop paths stay copy-only)
@@ -317,7 +348,7 @@ def transcript_poller() -> None:
             armed = BTN12["awaiting_since"]
             fresh = bool(armed) and (time.monotonic() - armed) < AWAIT_WINDOW_S
             BTN12["awaiting_since"] = 0.0  # consumed or stale either way
-        if not fresh:
+        if not fresh or not CONFIG.get("auto_paste", True):
             continue
         # wait for focus to leave Wispr (stop-fire refocus may be mid-flight)
         deadline = time.monotonic() + 3.0
@@ -330,8 +361,9 @@ def transcript_poller() -> None:
             log(f"row {rowid}: focus stayed on a deny-listed window — copied only, no paste")
             continue
         inject_paste()
-        time.sleep(0.30)
-        ydo_key("28:1", "28:0")  # Enter
+        if CONFIG.get("press_enter_after_paste", True):
+            time.sleep(0.30)
+            ydo_key("28:1", "28:0")  # Enter
         log(f"row {rowid}: auto-pasted + Enter ({len(text)} chars)")
 
 

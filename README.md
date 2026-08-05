@@ -1,6 +1,7 @@
-# wispr-flow-linux-shim
+# Atlas Wispr
 
-Make [Wispr Flow](https://wisprflow.ai) genuinely usable on Linux.
+Make [Wispr Flow](https://wisprflow.ai) genuinely usable on Linux - with a
+system tray you can actually configure, not a config file you have to guess at.
 
 Wispr Flow ships no Linux build. The Windows app runs under Wine, but three
 things break badly enough that most people give up:
@@ -15,6 +16,11 @@ This shim fixes all three from the Linux side. It changes nothing inside the
 Wine prefix and does not patch the application.
 
 ## What you get
+
+- **A system tray app.** Set your dictation key by pressing it, choose your
+  keyboard, toggle auto-paste and notifications, hide or show the Wispr window,
+  start and stop dictation. A first-run wizard checks your dependencies and
+  walks you through setup.
 
 - **Dictation from any window.** Press your chord anywhere. The shim remembers
   the focused window, activates Wispr, re-injects the chord, restores your
@@ -42,9 +48,14 @@ Wine prefix and does not patch the application.
 ```sh
 git clone https://github.com/Atlas-X-AI/wispr-flow-linux-shim
 cd wispr-flow-linux-shim
-./install.sh          # copies to ~/.local/bin, installs the systemd user unit
-systemctl --user enable --now wispr-focus-shim
+./install.sh
+atlas-wispr-tray &
 ```
+
+The installer checks every dependency and tells you exactly what to install if
+something is missing. The tray then opens a setup wizard on first run: pick your
+keyboard, press the key you want for dictation, done. It starts automatically at
+login from then on.
 
 Then, once, allow XWayland to receive global chords so the Wine app can hear
 its own hotkey (KDE Plasma):
@@ -56,7 +67,11 @@ qdbus6 org.kde.KWin /KWin reconfigure
 
 ## Configuration
 
-Everything is environment variables; no config file.
+Use the tray. Everything below is for automation and troubleshooting.
+
+Settings live in `~/.config/wispr-shim/config.json`, written by the tray.
+Environment variables override the file, so a running setup can always be
+debugged without editing anything:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -79,9 +94,8 @@ window. F16 is unbound on a stock system.
 
 ## Extras
 
-- `bin/wispr-hub-visibility show|hide` - toggle a KWin rule that makes the Wispr
-  window fully transparent, so it never covers your screen. Show it when you
-  need the application's own settings, hide it again after.
+- `bin/wispr-hub-visibility show|hide` - the same window transparency toggle the
+  tray offers, exposed for scripts.
 - `contrib/naga-bind` - bind Razer Naga side buttons through input-remapper
   presets from the command line, with macro validation and automatic backups.
 
