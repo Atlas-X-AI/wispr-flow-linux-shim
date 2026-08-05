@@ -156,7 +156,7 @@ def inject_chord() -> None:
 
 
 def inject_paste() -> None:
-    """Ctrl+Shift+V — Hayden's paste chord."""
+    """Ctrl+Shift+V - paste-without-formatting, works in terminals and most apps."""
     ydo_key("29:1", "42:1", "47:1")
     time.sleep(0.08)
     ydo_key("47:0", "42:0", "29:0")
